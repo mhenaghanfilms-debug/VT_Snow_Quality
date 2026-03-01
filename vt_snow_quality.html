@@ -1,0 +1,2675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VT Backcountry Snow Quality</title>
+    <!-- Preconnect: browser opens TCP+TLS to these hosts immediately, before any JS runs -->
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="preconnect" href="https://api.open-meteo.com" crossorigin>
+    <link rel="preconnect" href="https://archive-api.open-meteo.com" crossorigin>
+    <link rel="preconnect" href="https://{s}.tile.opentopomap.org" crossorigin>
+    <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
+    <link rel="dns-prefetch" href="https://api.open-meteo.com">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <!-- async instead of defer: doesn't block DOMContentLoaded, so weather loads immediately
+         while the map library arrives in the background. onload calls initMap when ready. -->
+    <script async src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"
+            onload="window._leafletReady=true; if(window._domReady) _tryInitMap();"
+            onerror="console.warn('Leaflet CDN failed — map unavailable')"></script>
+    <style>
+        :root {
+            --bg:      #0d1b2a;
+            --surface: #1b2d42;
+            --s2:      #243647;
+            --border:  #2d4159;
+            --text:    #e0eff7;
+            --dim:     #6b93b0;
+            --accent:  #4fc3f7;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body {
+            background:var(--bg); color:var(--text);
+            font-family:'Segoe UI',system-ui,sans-serif;
+            height:100vh; display:flex; flex-direction:column; overflow:hidden;
+        }
+
+        /* ── HEADER ──────────────────────────────────────────── */
+        header {
+            background:var(--surface); border-bottom:1px solid var(--border);
+            height:54px; padding:0 16px; display:flex; align-items:center;
+            gap:12px; flex-shrink:0; z-index:1000;
+        }
+        .logo { font-size:1.5rem; }
+        .hd-title h1 { font-size:1.03rem; font-weight:700; color:var(--accent); }
+        .hd-title p  { font-size:.67rem; color:var(--dim); }
+        .hd-right { margin-left:auto; display:flex; align-items:center; gap:9px; }
+        #lastUpdated { font-size:.7rem; color:var(--dim); white-space:nowrap; }
+        .btn {
+            background:var(--s2); border:1px solid var(--border); color:var(--text);
+            padding:5px 10px; border-radius:5px; cursor:pointer; font-size:.75rem;
+            transition:background .15s; white-space:nowrap;
+        }
+        .btn:hover { background:var(--border); }
+        .btn.active { background:var(--accent); color:#0d1b2a; border-color:var(--accent); }
+        .avy-btn { background:rgba(183,28,28,.22); border:1px solid rgba(239,83,80,.35); color:#ef9a9a; text-decoration:none; }
+        .avy-btn:hover { background:rgba(183,28,28,.38); }
+
+        /* ── LAYOUT ──────────────────────────────────────────── */
+        .main { display:flex; flex:1; overflow:hidden; }
+        #map  { flex:1; z-index:1; }
+
+        /* ── SIDEBAR ─────────────────────────────────────────── */
+        .sidebar {
+            width:520px; background:var(--surface);
+            border-left:1px solid var(--border);
+            display:flex; flex-direction:column; overflow:hidden;
+        }
+        .zone-detail { flex-shrink:0; max-height:70%; overflow-y:auto; }
+
+        .zone-placeholder { padding:28px 18px; text-align:center; color:var(--dim); }
+        .zone-placeholder .icon { font-size:2.2rem; margin-bottom:8px; }
+        .zone-placeholder p { font-size:.8rem; line-height:1.65; }
+
+        /* Detail header */
+        .zdh { padding:12px 14px; background:var(--s2); border-bottom:1px solid var(--border); }
+        .zdh h2 { font-size:1rem; font-weight:700; margin-bottom:3px; }
+        .zone-meta { display:flex; gap:10px; font-size:.7rem; color:var(--dim); margin-bottom:9px; flex-wrap:wrap; }
+
+        /* Primary quality badge */
+        .qbadge {
+            display:flex; align-items:center; gap:9px;
+            padding:8px 12px; border-radius:7px; margin-bottom:6px;
+            border:1px solid transparent;
+        }
+        .qbadge .emoji { font-size:1.4rem; }
+        .qbadge .qname { font-size:.93rem; font-weight:700; }
+        .qbadge .stars { font-size:.63rem; color:gold; letter-spacing:.5px; }
+        .qreason { font-size:.74rem; color:var(--dim); line-height:1.55; }
+
+        .a-excellent{ background:rgba(13,71,161,.2);  border-color:rgba(66,165,245,.3);  color:#90CAF9; }
+        .a-good     { background:rgba(106,27,154,.2); border-color:rgba(186,104,200,.3); color:#CE93D8; }
+        .a-fair     { background:rgba(69,90,100,.2);  border-color:rgba(144,164,174,.25);color:#B0BEC5; }
+        .a-warning  { background:rgba(230,81,0,.2);   border-color:rgba(255,171,64,.3);  color:#FFAB64; }
+        .a-danger   { background:rgba(183,28,28,.2);  border-color:rgba(239,83,80,.3);   color:#EF9A9A; }
+        .a-unknown  { background:rgba(55,71,79,.2);   border-color:rgba(84,110,122,.25); color:#90A4AE; }
+
+        /* ── ASPECT ROSE ─────────────────────────────────────── */
+        .rose-wrap {
+            padding:10px 14px 6px;
+            border-bottom:1px solid var(--border);
+            display:flex; flex-direction:column; align-items:center; gap:6px;
+        }
+        .rose-title { font-size:.62rem; color:var(--dim); text-transform:uppercase; letter-spacing:.1em; align-self:flex-start; }
+        .rose-row { display:flex; align-items:center; gap:14px; width:100%; }
+        .rose-svg-wrap { flex-shrink:0; }
+        .rose-legend { flex:1; }
+
+        /* Aspect quality grid — 8 rows, 2 cols */
+        .asp-grid {
+            display:grid; grid-template-columns:1fr 1fr;
+            gap:3px;
+        }
+        .asp-cell {
+            display:flex; align-items:center; gap:5px;
+            padding:3px 6px; border-radius:4px;
+            border-left:3px solid transparent;
+            background:rgba(255,255,255,.03);
+            font-size:.68rem;
+            cursor:pointer; transition:background .12s;
+        }
+        .asp-cell:hover { background:rgba(255,255,255,.09); }
+        .asp-cell.primary {
+            background:rgba(255,255,255,.08);
+            outline:1px solid rgba(255,255,255,.12);
+        }
+        .asp-cell.selected {
+            background:rgba(79,195,247,.13);
+            outline:1px solid rgba(79,195,247,.35);
+        }
+
+        /* ── ASPECT DETAIL CARD (shown on wedge/cell click) ── */
+        .aspect-detail {
+            display:none;
+            padding:10px 14px 12px;
+            border-bottom:1px solid var(--border);
+            background:rgba(79,195,247,.04);
+            border-top:2px solid rgba(79,195,247,.2);
+        }
+        .ad-header {
+            display:flex; align-items:center; gap:6px; margin-bottom:5px;
+        }
+        .ad-asp-label {
+            font-size:.9rem; font-weight:700; color:var(--text);
+        }
+        .ad-primary-badge {
+            background:rgba(79,195,247,.15); color:var(--accent);
+            border:1px solid rgba(79,195,247,.3);
+            border-radius:10px; padding:1px 7px;
+            font-size:.57rem; letter-spacing:.06em; text-transform:uppercase;
+        }
+        .ad-quality { font-size:.82rem; font-weight:700; margin-bottom:3px; }
+        .ad-reason  { font-size:.68rem; color:var(--dim); line-height:1.52; margin-bottom:8px; }
+        .ad-ot {
+            display:flex; align-items:flex-start; gap:9px;
+            padding-top:7px; border-top:1px solid var(--border);
+        }
+        .ad-ot-icon  { font-size:1.15rem; flex-shrink:0; line-height:1.1; margin-top:1px; }
+        .ad-ot-time  { font-size:.85rem; font-weight:700; color:var(--accent); margin-bottom:2px; }
+        .ad-ot-detail{ font-size:.67rem; color:var(--dim); line-height:1.5; }
+        .asp-dir  { font-weight:700; color:var(--dim); min-width:20px; font-size:.65rem; }
+        .asp-emoji { font-size:.82rem; }
+        .asp-qname { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+        /* ── METRICS ─────────────────────────────────────────── */
+        .metrics {
+            display:grid; grid-template-columns:repeat(5,1fr);
+            gap:1px; background:var(--border); border-top:1px solid var(--border);
+        }
+        .metric { background:var(--surface); padding:7px 5px; text-align:center; }
+        .mval { font-size:.95rem; font-weight:700; color:var(--accent); }
+        .mlbl { font-size:.57rem; color:var(--dim); margin-top:2px; text-transform:uppercase; letter-spacing:.04em; }
+
+        /* Source tag */
+        .source-tag {
+            padding:5px 14px; font-size:.66rem; color:var(--dim);
+            border-bottom:1px solid var(--border); display:flex; align-items:center; gap:5px;
+        }
+        .sdot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+
+        /* Chart */
+        .chart-wrap { padding:8px 12px 10px; border-bottom:1px solid var(--border); }
+        .chart-title { font-size:.6rem; color:var(--dim); text-transform:uppercase; letter-spacing:.1em; margin-bottom:5px; }
+        .chart-box { position:relative; height:130px; }
+
+        /* Zone desc */
+        .zdesc { padding:8px 14px; font-size:.71rem; color:var(--dim); line-height:1.55; border-bottom:1px solid var(--border); }
+
+        /* ── ZONE LIST ───────────────────────────────────────── */
+        .zone-list { flex:1; overflow-y:auto; min-height:60px; }
+        .zl-header {
+            padding:7px 14px; font-size:.62rem; color:var(--dim);
+            text-transform:uppercase; letter-spacing:.1em;
+            background:var(--s2); border-bottom:1px solid var(--border);
+            position:sticky; top:0; z-index:5;
+        }
+        .zitem {
+            display:flex; align-items:center; gap:8px; padding:7px 12px;
+            border-bottom:1px solid var(--border); cursor:pointer; transition:background .12s;
+        }
+        .zitem:hover { background:var(--s2); }
+        .zitem.active { background:var(--s2); border-left:3px solid var(--accent); padding-left:9px; }
+        .zdot  { width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.9rem; flex-shrink:0; }
+        .zi-info { flex:1; min-width:0; }
+        .zi-name { font-size:.79rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .zi-sub  { font-size:.67rem; color:var(--dim); }
+        .zi-temp { font-size:.8rem; font-weight:700; color:var(--accent); flex-shrink:0; }
+        /* mini rose in list */
+        .mini-rose { flex-shrink:0; }
+
+        /* loading */
+        .loading-row { display:flex; align-items:center; gap:8px; padding:13px; color:var(--dim); font-size:.75rem; }
+        .spinner { width:13px; height:13px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+
+
+        /* LEAFLET overrides */
+        .leaflet-control-zoom a { background:var(--s2)!important; color:var(--text)!important; border-color:var(--border)!important; }
+        .leaflet-tooltip {
+            background:rgba(13,27,42,.94)!important; border:1px solid var(--border)!important;
+            color:var(--text)!important; font-size:.7rem!important; font-weight:600!important;
+            padding:3px 8px!important; border-radius:4px!important;
+        }
+        .leaflet-tooltip-left::before  { border-left-color:rgba(13,27,42,.94)!important; }
+        .leaflet-tooltip-right::before { border-right-color:rgba(13,27,42,.94)!important; }
+
+        /* ── OPTIMAL TIME WIDGET ─────────────────────────── */
+        .optimal-time {
+            padding:9px 14px 11px; border-bottom:1px solid var(--border);
+            background:rgba(79,195,247,.05);
+        }
+        .ot-header {
+            font-size:.58rem; color:var(--dim); text-transform:uppercase;
+            letter-spacing:.12em; margin-bottom:6px;
+        }
+        .ot-card { display:flex; align-items:flex-start; gap:10px; }
+        .ot-icon { font-size:1.45rem; flex-shrink:0; line-height:1.1; margin-top:1px; }
+        .ot-time {
+            font-size:.93rem; font-weight:700; color:var(--accent);
+            margin-bottom:2px; line-height:1.2;
+        }
+        .ot-detail { font-size:.69rem; color:var(--dim); line-height:1.52; }
+
+        /* ── DAY ARC TIMELINE ────────────────────────────────── */
+        .day-arc {
+            padding:10px 14px 13px; border-bottom:1px solid var(--border);
+        }
+        .da-header {
+            font-size:.57rem; color:var(--dim); text-transform:uppercase;
+            letter-spacing:.1em; margin-bottom:7px;
+            display:flex; justify-content:space-between; align-items:center;
+        }
+        .da-aspect-label { color:var(--accent); font-weight:600; }
+        .da-track {
+            position:relative; height:58px; display:flex;
+            border-radius:6px; overflow:hidden;
+            border:1px solid rgba(255,255,255,.07);
+        }
+        .da-block {
+            display:flex; flex-direction:column; justify-content:center;
+            align-items:center; gap:2px; overflow:hidden;
+            position:relative; transition:filter .12s;
+            border-right:1px solid rgba(0,0,0,.3); flex-shrink:0;
+            cursor:default;
+        }
+        .da-block:last-child { border-right:none; }
+        .da-block:hover { filter:brightness(1.18); }
+        .da-emoji { font-size:.95rem; line-height:1; }
+        .da-label {
+            font-size:.52rem; font-weight:700; white-space:nowrap;
+            overflow:hidden; text-overflow:ellipsis;
+            padding:0 4px; max-width:100%; text-align:center;
+            color:rgba(255,255,255,.93);
+        }
+        .da-time-row {
+            position:relative; height:15px; margin-top:3px;
+            font-size:.56rem; color:var(--dim);
+        }
+        .da-tick {
+            position:absolute; transform:translateX(-50%); white-space:nowrap;
+        }
+
+        /* ── TABS ────────────────────────────────────────────── */
+        .tab-bar {
+            display:flex; background:var(--s2);
+            border-bottom:1px solid var(--border); flex-shrink:0;
+        }
+        .tab-btn {
+            flex:1; background:none; border:none;
+            border-bottom:2px solid transparent;
+            color:var(--dim); padding:9px 0;
+            font-size:.73rem; font-weight:600; letter-spacing:.03em;
+            cursor:pointer; transition:color .15s, border-color .15s;
+        }
+        .tab-btn:hover { color:var(--text); }
+        .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+        /* ── TOMORROW ─────────────────────────────────────────── */
+        .tmr-tag {
+            display:inline-flex; align-items:center; gap:4px;
+            background:rgba(255,152,0,.13); color:#FFB74D;
+            border:1px solid rgba(255,152,0,.28); border-radius:10px;
+            padding:1px 8px; font-size:.58rem; font-weight:700;
+            letter-spacing:.07em; text-transform:uppercase;
+            vertical-align:middle; margin-left:5px;
+        }
+        .picks-banner {
+            padding:10px 12px 9px; border-bottom:1px solid var(--border);
+            background:rgba(79,195,247,.03);
+        }
+        .picks-title {
+            font-size:.57rem; color:var(--dim); text-transform:uppercase;
+            letter-spacing:.1em; margin-bottom:7px;
+        }
+        .pick-row {
+            display:flex; align-items:flex-start; gap:8px;
+            margin-bottom:5px; font-size:.72rem;
+        }
+        .pick-row:last-child { margin-bottom:0; }
+        .pick-icon { font-size:.9rem; flex-shrink:0; line-height:1.4; }
+        .pick-zones { color:var(--text); line-height:1.4; }
+        .pick-label { color:var(--dim); font-size:.67rem; }
+        .no-picks { font-size:.74rem; color:var(--dim); text-align:center; padding:4px 0; }
+        .tmr-metrics { display:grid; grid-template-columns:repeat(4,1fr); }
+
+        /* ── OVERNIGHT REFREEZE ──────────────────────────────── */
+        .overnight-wrap {
+            padding:9px 14px 11px; border-bottom:1px solid var(--border);
+        }
+        .overnight-header {
+            font-size:.57rem; color:var(--dim); text-transform:uppercase;
+            letter-spacing:.12em; margin-bottom:6px;
+        }
+        .overnight-card {
+            display:flex; align-items:flex-start; gap:10px;
+        }
+        .overnight-icon { font-size:1.4rem; flex-shrink:0; line-height:1.1; margin-top:1px; }
+        .overnight-bar-wrap { flex:1; }
+        .overnight-label { font-size:.68rem; color:var(--dim); line-height:1.5; margin-top:4px; }
+        .overnight-bar-track {
+            height:7px; border-radius:4px; background:var(--border);
+            overflow:hidden; margin-bottom:2px;
+        }
+        .overnight-bar-fill { height:100%; border-radius:4px; transition:width .3s; }
+
+        /* ── TRAIL PICKS ─────────────────────────────────────── */
+        .trail-picks {
+            border-top:1px solid var(--border);
+            padding:10px 14px 4px;
+        }
+        .trail-picks-hd {
+            font-size:.65rem; color:var(--dim); text-transform:uppercase;
+            letter-spacing:.1em; margin-bottom:7px;
+        }
+        .trail-time-btns {
+            display:flex; gap:5px; flex-wrap:wrap; margin-bottom:9px;
+        }
+        .tpick-btn {
+            background:var(--s2); border:1px solid var(--border);
+            color:var(--dim); padding:3px 9px; border-radius:4px;
+            font-size:.68rem; cursor:pointer; transition:all .15s;
+        }
+        .tpick-btn:hover { color:var(--text); border-color:var(--accent); }
+        .tpick-btn.active { background:var(--accent); color:#0d1b2a; border-color:var(--accent); }
+        .trail-group { margin-bottom:7px; }
+        .tg-hd {
+            font-size:.6rem; text-transform:uppercase; letter-spacing:.08em;
+            padding:2px 0 4px; margin-bottom:2px;
+        }
+        .tg-hd.prime { color:#F9A825; }
+        .tg-hd.good  { color:#42A5F5; }
+        .tg-hd.meh   { color:#78909C; }
+        .trail-row {
+            display:flex; align-items:center; gap:7px;
+            padding:3px 0; border-bottom:1px solid rgba(45,65,89,.4); font-size:.73rem;
+        }
+        .trail-row:last-child { border-bottom:none; }
+        .trail-diff { font-size:.8rem; flex-shrink:0; width:18px; text-align:center; }
+        .trail-name { flex:1; font-weight:600; }
+        .trail-asp  { font-size:.63rem; color:var(--dim); width:22px; }
+        .trail-q    { font-size:.68rem; font-weight:600; }
+
+        /* Map legend */
+        .map-legend {
+            background:rgba(13,27,42,.9); border:1px solid var(--border);
+            padding:8px 10px; border-radius:5px; font-size:.64rem; color:var(--dim); line-height:1.9;
+        }
+        .map-legend strong { color:var(--text); display:block; margin-bottom:1px; font-size:.65rem; }
+        .leg-row { display:flex; align-items:center; gap:5px; }
+        .leg-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+
+        /* ── MOBILE RESPONSIVE ───────────────────────────────── */
+        @media (max-width: 768px) {
+
+            /* Header: condense */
+            header { height:48px; padding:0 10px; gap:7px; }
+            .logo { font-size:1.25rem; }
+            .hd-title h1 { font-size:.82rem; }
+            .hd-title p  { display:none; }
+            #lastUpdated { display:none; }
+            .hd-right { gap:6px; }
+            .btn { padding:5px 8px; font-size:.7rem; }
+
+            /* Stack map above sidebar */
+            body { overflow:hidden; }
+            .main { flex-direction:column; }
+            #map  { height:42vh; flex:none; }
+
+            /* Sidebar becomes full-width bottom panel */
+            .sidebar {
+                width:100%;
+                height:58vh;
+                border-left:none;
+                border-top:2px solid var(--border);
+                flex-direction:column;
+            }
+            .zone-detail { max-height:58%; }
+
+            /* Larger touch targets for list items */
+            .zitem { min-height:48px; padding:8px 12px; }
+            .tab-btn { padding:11px 0; font-size:.76rem; }
+            .tpick-btn { padding:6px 11px; font-size:.71rem; min-height:34px; }
+            .asp-cell { padding:5px 7px; min-height:36px; }
+
+            /* Rose: shrink SVG via CSS, keep viewBox scaling */
+            .rose-svg-wrap svg { width:130px !important; height:130px !important; }
+
+            /* Rose row: stack on narrow screens */
+            .rose-row { flex-wrap:wrap; gap:8px; }
+            .rose-legend { min-width:160px; }
+
+            /* Metrics: 3 cols instead of 5 */
+            .metrics { grid-template-columns:repeat(3,1fr); }
+            .mval { font-size:.88rem; }
+
+            /* Chart: shorter */
+            .chart-box { height:100px; }
+
+            /* Trail time buttons: bigger gaps */
+            .trail-time-btns { gap:6px; }
+        }
+
+        @media (max-width: 480px) {
+            header { height:44px; }
+            .hd-title h1 { font-size:.75rem; }
+            /* Hide satellite button on very small screens — reclaim space */
+            #satBtn { display:none; }
+            .btn.avy-btn { font-size:.65rem; padding:5px 7px; }
+
+            #map { height:38vh; }
+            .sidebar { height:62vh; }
+            .zone-detail { max-height:52%; }
+
+            /* Rose: go smaller */
+            .rose-svg-wrap svg { width:110px !important; height:110px !important; }
+
+            /* Metrics: 2 rows of 3 — drop to 2-col if needed */
+            .metrics { grid-template-columns:repeat(3,1fr); }
+            .mval { font-size:.82rem; }
+            .mlbl { font-size:.52rem; }
+
+            /* Day arc: tighter label */
+            .da-emoji { font-size:.8rem; }
+            .da-label  { font-size:.46rem; }
+
+            /* Inline trail aspect label — save width */
+            .trail-name { font-size:.7rem; }
+        }
+
+        /* Prevent iOS Safari scroll bounce on fixed panels */
+        @supports (-webkit-overflow-scrolling: touch) {
+            .zone-detail, .zone-list { -webkit-overflow-scrolling:touch; }
+        }
+    </style>
+</head>
+<body>
+
+
+<!-- ── HEADER ──────────────────────────────────────────────────── -->
+<header>
+    <div class="logo">🏔️</div>
+    <div class="hd-title">
+        <h1>Vermont Backcountry Snow Quality</h1>
+        <p>Southern VT · 8-aspect terrain analysis · Live weather data</p>
+    </div>
+    <div class="hd-right">
+        <a class="btn avy-btn" href="https://avalanche.org/forecast/#/mount-washington" target="_blank">⚠️ Avy Forecast</a>
+        <button class="btn" id="satBtn" onclick="toggleSatellite()" title="Switch to satellite view to see tree canopy">🛰️ Satellite</button>
+        <span id="lastUpdated">Loading…</span>
+        <button class="btn" onclick="loadAllZones(true)">↻ Refresh</button>
+    </div>
+</header>
+
+<!-- ── MAIN ────────────────────────────────────────────────────── -->
+<div class="main">
+    <div id="map"></div>
+    <div class="sidebar">
+        <div class="zone-detail" id="zoneDetail">
+            <div class="zone-placeholder">
+                <div class="icon">🗺️</div>
+                <p>Click a wedge or zone name to see<br>the full 8-aspect snow quality breakdown.</p>
+            </div>
+        </div>
+        <div class="zone-list">
+            <div class="tab-bar">
+                <button class="tab-btn active" id="tab-today"    onclick="switchTab('today')">⛷️&nbsp;Today</button>
+                <button class="tab-btn"         id="tab-tomorrow" onclick="switchTab('tomorrow')">🌅&nbsp;Tomorrow</button>
+            </div>
+            <div id="zoneListItems">
+                <div class="loading-row"><div class="spinner"></div>Fetching live weather…</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+// CONSTANTS
+// ════════════════════════════════════════════════════════════
+const ASPECTS    = ['N','NE','E','SE','S','SW','W','NW'];
+const ASP_DEG    = {N:0,NE:45,E:90,SE:135,S:180,SW:225,W:270,NW:315};
+
+// canopy: 'conifer' | 'deciduous' | 'mixed' | 'open'
+// Winter solar shade: conifer ~55%, mixed ~35%, deciduous ~15%, open 0%
+// Above ~2800ft in VT: boreal spruce-fir (conifer); below: mixed hardwood-conifer transition
+const ZONES = [
+    {
+        id:'stratton', name:'Stratton Mountain', lat:43.086, lon:-72.925, elev:3940, aspect:'N', canopy:'open', type:'resort',
+        desc:'Highest peak in southern VT. Above treeline on the summit ridge — fully exposed. North-facing backcountry benefits from coldest temps.'
+    },
+    {
+        id:'stratton_tf', name:'Stratton Town Forest', lat:43.002306, lon:-72.905421, elev:2700, aspect:'NW', canopy:'conifer',
+        desc:'Dense spruce-fir forest on the NW flank. Conifer canopy shields snow from sun and wind year-round — powder preservation is excellent.'
+    },
+    {
+        id:'glebe', name:'Glebe Mountain', lat:43.188, lon:-72.761, elev:2923, aspect:'NE', canopy:'mixed',
+        desc:'Classic southern VT backcountry on the summit above Magic Mountain. Upper elevations transition to boreal conifers; lower slopes are mixed hardwood-conifer.'
+    },
+    {
+        id:'magic', name:'Magic Mountain', lat:43.202, lon:-72.773, elev:2850, aspect:'N', canopy:'conifer', type:'resort',
+        desc:'Legendary north-facing glades in dense conifer. Canopy + true north exposure = powder lasts days longer than open terrain after a storm.'
+    },
+    {
+        id:'peru', name:'Peru Peak', lat:43.294, lon:-72.938, elev:3435, aspect:'N', canopy:'conifer',
+        desc:'Remote north-facing terrain in Green Mountain NF. Boreal spruce-fir above 2800ft provides dense year-round canopy.'
+    },
+    {
+        id:'styles', name:'Styles Peak', lat:43.274, lon:-72.938, elev:3373, aspect:'NE', canopy:'conifer',
+        desc:'Adjacent to Peru Peak with open glades in a conifer setting. Very low traffic. Boreal canopy keeps snow protected.'
+    },
+    {
+        id:'bromley', name:'Bromley Mountain', lat:43.228, lon:-72.939, elev:3235, aspect:'SE', canopy:'mixed', type:'resort',
+        desc:'SE-facing "sun mountain". Mixed forest canopy means solar exposure is significant. Best for spring corn; avoid for powder preservation.'
+    },
+    {
+        id:'dover_tf', name:'Dover Town Forest', lat:42.974493, lon:-72.822181, elev:2200, aspect:'NE', canopy:'mixed',
+        desc:'Lower-elevation town forest near Mount Snow. Mixed hardwood-conifer — deciduous trees currently bare in winter, reducing canopy protection.'
+    },
+    {
+        id:'haystack', name:'Haystack Mountain', lat:42.914, lon:-72.920, elev:3425, aspect:'N', canopy:'conifer', type:'resort',
+        desc:'North-facing terrain in the Mount Snow corridor. High elevation boreal conifers provide good snow protection.'
+    },
+    {
+        id:'mtsnow', name:'Mount Snow Resort', lat:42.959, lon:-72.924, elev:3583, aspect:'S', canopy:'open', type:'resort',
+        desc:'Summit ridge at 3,583ft with predominantly south-facing resort terrain. Main trails and Front Four glades face south — strong solar exposure makes this a prime spring corn mountain.'
+    }
+];
+
+
+// ════════════════════════════════════════════════════════════
+// TIME HELPERS
+// ════════════════════════════════════════════════════════════
+function getNowNY() {
+    return new Intl.DateTimeFormat('sv-SE',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date()).replace(' ','T');
+}
+function getTodayNY() { return getNowNY().slice(0,10); } // "YYYY-MM-DD"
+
+// ════════════════════════════════════════════════════════════
+// GEOGRAPHY — offset a lat/lon by distance + bearing
+// ════════════════════════════════════════════════════════════
+function offsetLatLon(lat, lon, distM, bearingDeg) {
+    const R=6371000, d=distM/R, b=bearingDeg*Math.PI/180;
+    const φ1=lat*Math.PI/180, λ1=lon*Math.PI/180;
+    const φ2=Math.asin(Math.sin(φ1)*Math.cos(d)+Math.cos(φ1)*Math.sin(d)*Math.cos(b));
+    const λ2=λ1+Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(φ1),Math.cos(d)-Math.sin(φ1)*Math.sin(φ2));
+    return [φ2*180/Math.PI, λ2*180/Math.PI];
+}
+
+// Build wedge polygon (pie-slice) for one compass direction
+function wedgePoly(lat, lon, bearingDeg, radiusM) {
+    const pts=[[lat,lon]];
+    for(let i=0;i<=10;i++) pts.push(offsetLatLon(lat,lon,radiusM,(bearingDeg-22.5)+(i/10)*45));
+    pts.push([lat,lon]);
+    return pts;
+}
+
+// ════════════════════════════════════════════════════════════
+// RESORT SNOW QUALITY CLASSIFICATION
+//
+// Resort model differs from backcountry in key ways:
+//   • No Variable/Thin — snowmaking ensures minimum coverage
+//   • No Wind Slab — grooming eliminates slab hazards on-piste
+//   • Lower powder threshold (4" vs 8") — groomers amplify fresh snow impact
+//   • Prime Grooming category — cold overnights create perfect corduroy
+//   • Icy/Hard Pack replaces Crusty/Ice — still skiable with grooming
+// ════════════════════════════════════════════════════════════
+function classifyResort(nd, zone) {
+    const {currentTempC:rawCurT, maxTempC_72h:rawMaxT, minTempC_72h:rawMinT,
+           snow24h_cm:s24, snow72h_cm:s72, snow7d_cm:s7,
+           rain24h_mm:r24, rain72h_mm:r72,
+           snowfall_season_cm:seasonSnow=0,
+           minTempTomorrow:rawMinTomorrow=null, maxTempTomorrow:rawMaxTomorrow=null} = nd;
+
+    const LAPSE_F = 1.5, ELEV_BASE = 1500;
+    const elevCorrC = (zone.elev ?? 0) > ELEV_BASE
+        ? -((zone.elev - ELEV_BASE) / 1000) * (LAPSE_F / 1.8) : 0;
+    const curT = rawCurT + elevCorrC;
+    const maxT = rawMaxT + elevCorrC;
+    const minT = rawMinT + elevCorrC;
+
+    // Tomorrow's temps (elevation-corrected) — used for corn-tomorrow prediction
+    const tomorrowMin = rawMinTomorrow != null ? rawMinTomorrow + elevCorrC : null;
+    const tomorrowMax = rawMaxTomorrow != null ? rawMaxTomorrow + elevCorrC : null;
+
+    const fahr = c => (c*9/5+32).toFixed(0);
+    const inch = cm => (cm/2.54).toFixed(1);
+    const month = new Date().getMonth();
+    const hour  = new Date().getHours();
+    const isCornSeason = month >= 2 && month <= 4;
+
+    const solarMap = {N:.05, NE:.20, NW:.12, E:.55, W:.45, SE:.80, SW:.72, S:.95};
+    const springMult  = isCornSeason ? 1.5 : (month === 1 ? 1.15 : 1.0);
+    const isWinter    = month <= 1 || month >= 10;
+    const canopyMult  = ({conifer:0.45, mixed:isWinter?0.65:0.50, deciduous:isWinter?0.85:0.45, open:1.0})[zone.canopy??'open'];
+    const rawSolar    = (solarMap[zone.aspect] ?? 0.5) * springMult;
+    const solar       = rawSolar * canopyMult;
+
+    const rainThenFreeze = r72 > 3 && curT < -2;
+    // Use RAW (pre-lapse) temps for melt-freeze checks: on open resort terrain solar
+    // radiation dominates, and the station reading is a better proxy for surface conditions
+    // than the aggressively lapse-corrected summit air temp.
+    const freezeThaw     = rawMaxT > 0 && rawMinT < -4;
+    const solarSoftening = rawSolar > 0.55 && curT > -4;
+    const activeMelt     = curT > 1;
+    const rainOnSnow     = r24 > 5;
+    const cornCycle      = rawMaxT >= 0 && rawMaxT <= 8 && rawMinT >= -16 && rawMinT <= -2;
+    const cornAspects    = ['S','SE','SW','E','W'];
+    const cornEligible   = isCornSeason || (month === 1 && cornAspects.includes(zone.aspect));
+    // Tomorrow sets up corn if it refreezes tonight and thaws again tomorrow
+    const cornTomorrow   = cornEligible && tomorrowMin != null && tomorrowMin < -2
+                           && tomorrowMax != null && tomorrowMax >= 0;
+
+    // ① POWDER DAY — 4"+ fresh snow, cold temps (lower threshold than BC)
+    if (s24 > 10 && curT < -2 && r72 < 1)
+        return {quality:'Powder Day', rating:10, color:'#1565C0', emoji:'❄️', alert:'excellent',
+            reason:`${inch(s24)}" fresh overnight at ${fahr(curT)}°F. Hit the groomers at first chair, then find the stashes.`};
+
+    // ② RAIN ON SNOW
+    if (rainOnSnow && !rainThenFreeze)
+        return {quality:'Wet/Slushy', rating:2, color:'#C62828', emoji:'💦', alert:'warning',
+            reason:`${r24.toFixed(1)}mm rain soaking the snowpack. Grabby and wet — wait for a freeze.`};
+
+    // ③ ICY/HARD PACK — rain refroze or hard freeze-thaw
+    if (rainThenFreeze || (freezeThaw && s24 < 5 && solar > 0.25))
+        return {quality:'Icy/Hard Pack', rating:4, color:'#78909C', emoji:'🧊', alert:'warning',
+            reason: rainThenFreeze
+                ? `${r72.toFixed(1)}mm rain refroze at ${fahr(curT)}°F. Groomed runs hard and fast; off-piste is bulletproof.`
+                : `Melt-refreeze (H:${fahr(maxT)}°F / L:${fahr(minT)}°F). Fast firm morning groomers — ski early before it softens.`};
+
+    // ④ SPRING CORN — use rawSolar (pre-canopy) since resort trails are cut open;
+    // tree cover on the slope doesn't block sun the way dense backcountry forest does.
+    if (cornEligible && cornCycle && rawSolar > 0.25 && hour < 15) {
+        const window = hour < 10 ? 'Still firm — wait for mid-morning softening.' :
+                       hour < 14 ? '🎯 Prime corn window (10am–2pm)!' :
+                                   'Past prime — getting wet. Wrap it up.';
+        return {quality:'Spring Corn', rating:8, color:'#F9A825', emoji:'🌽', alert:'good',
+            reason:`Melt-freeze on ${zone.aspect}-facing terrain (H:${fahr(rawMaxT)}°F / L:${fahr(rawMinT)}°F). ${window}`};
+    }
+
+    // ④b POST-CORN REFREEZE — evening after a corn day: surface is tracked and locking up,
+    // not groomed corduroy. The melt-freeze cycle happened; now it's refreezing on skied-off snow.
+    if (cornEligible && cornCycle && hour >= 15 && curT < -1) {
+        const tomorrowNote = cornTomorrow
+            ? ` Tonight refreezes to ${fahr(tomorrowMin)}°F — tomorrow repeats the cycle.`
+            : ' Check conditions tomorrow morning.';
+        return {quality:'Icy/Hard Pack', rating:4, color:'#78909C', emoji:'🧊', alert:'warning',
+            reason:`Post-corn refreeze at ${fahr(curT)}°F. Surface worked over and locking up — not groomed.${tomorrowNote}`};
+    }
+
+    // ⑤ WET / SOLAR-SOFTENED
+    if (activeMelt || solarSoftening)
+        return {quality:'Wet/Slushy', rating:3, color:'#C62828', emoji:'💦', alert:'warning',
+            reason: activeMelt
+                ? `${fahr(curT)}°F — wet, heavy snow. Ski the morning, skip the afternoon.`
+                : `Solar loading on ${zone.aspect}-facing terrain (${fahr(curT)}°F). Groomers soften quickly in direct sun.`};
+
+    // ⑥ PRIME GROOMING — very cold overnight, no corn cycle today, textbook corduroy.
+    // Explicitly excluded when it was a corn day (surface is tracked/icy, not freshly groomed).
+    if (curT < -4 && minT < -8 && s24 < 10 && !cornCycle)
+        return {quality:'Prime Grooming', rating:8, color:'#00897B', emoji:'⭐', alert:'good',
+            reason:`${fahr(minT)}°F overnight locked in perfect corduroy. Cold, fast, consistent — ideal carving conditions.`};
+
+    // ⑦ GOOD CONDITIONS — cold settled snow
+    if (curT < 0 && (s7 > 4 || seasonSnow > 15))
+        return {quality:'Good Conditions', rating:6, color:'#1976D2', emoji:'🎿', alert:'good',
+            reason:`${fahr(curT)}°F keeping snow firm. Groomed runs consistent. ${inch(s7)}" in the past week.`};
+
+    // ⑧ VARIABLE — check resort report
+    return {quality:'Variable', rating:3, color:'#37474F', emoji:'❓', alert:'fair',
+        reason:`Mixed conditions at ${fahr(curT)}°F. Check the resort's morning grooming report.`};
+}
+
+// ════════════════════════════════════════════════════════════
+// SNOW QUALITY CLASSIFICATION — 7 consolidated categories
+//
+// Real-world calibration note (Dover Town Forest, Feb 2026):
+//   SE aspect → sticky/wet surface despite cold air temp
+//   NE aspect → good settled powder
+//   Root cause: solar softening on SE even at -1 to -2°C air temp.
+//   Fix: solarSoftening flag fires when solar > 0.50 AND curT > -3°C
+//   SE mixed-winter solar = 0.80 × 1.15 × 0.65 = 0.598  → triggers ✓
+//   NE mixed-winter solar = 0.20 × 1.15 × 0.65 = 0.149  → safe    ✓
+// ── TRAIL DATABASE ─────────────────────────────────────────────
+// aspect = primary face direction, diff = difficulty emoji
+// Trail orientation based on published trail maps; approximations may vary.
+const TRAILS = {
+    mtsnow: [
+        // Front Four — true south-facing steep shots
+        {name:'Ripcord',        aspect:'S',  diff:'💀'},
+        {name:'Jaws of Death',  aspect:'S',  diff:'💀'},
+        {name:'Fallen Timbers', aspect:'S',  diff:'💀'},
+        {name:'Lift Line',      aspect:'S',  diff:'⬛'},
+        // Main mountain south / mid-mountain
+        {name:'Nitro',          aspect:'S',  diff:'🔵'},
+        {name:'Long John',      aspect:'S',  diff:'🔵'},
+        {name:'Exhibition',     aspect:'SE', diff:'🔵'},
+        {name:'Sundance',       aspect:'SE', diff:'🟢'},
+        // Sunbrook — southeast pod
+        {name:'Sunbrook',       aspect:'SE', diff:'🟢'},
+        {name:'No Problem',     aspect:'SE', diff:'🔵'},
+        {name:'Grand Summit',   aspect:'SE', diff:'⬛'},
+        // North Face — shaded north-facing
+        {name:'Canyon',         aspect:'N',  diff:'⬛'},
+        {name:'North Face',     aspect:'NW', diff:'💀'},
+        // Carinthia — east-facing park
+        {name:'Carinthia',      aspect:'E',  diff:'🎿'},
+        {name:'Drifter',        aspect:'E',  diff:'🔵'},
+    ],
+    bromley: [
+        {name:'Pabst Peril',    aspect:'SE', diff:'💀'},
+        {name:'Havoc',          aspect:'SE', diff:'⬛'},
+        {name:'Upper Twister',  aspect:'SE', diff:'⬛'},
+        {name:'Blue Ribbon',    aspect:'SE', diff:'🔵'},
+        {name:'Twister',        aspect:'S',  diff:'🔵'},
+        {name:'Thruway',        aspect:'S',  diff:'🟢'},
+        {name:'Witch Way',      aspect:'SW', diff:'⬛'},
+        {name:'Christie',       aspect:'SE', diff:'🟢'},
+    ],
+    stratton: [
+        {name:'Sun Bowl',       aspect:'S',  diff:'💀'},
+        {name:'Upper Reach',    aspect:'S',  diff:'⬛'},
+        {name:'Shooting Star',  aspect:'SE', diff:'🔵'},
+        {name:'Standard',       aspect:'E',  diff:'🟢'},
+        {name:'Polar Bear',     aspect:'N',  diff:'⬛'},
+        {name:'Slalom Hill',    aspect:'NE', diff:'⬛'},
+        {name:'Wanderer',       aspect:'SE', diff:'🔵'},
+        {name:'Suntreader',     aspect:'SW', diff:'🔵'},
+    ],
+    magic: [
+        {name:'Black Line',     aspect:'N',  diff:'💀'},
+        {name:'Black Magic',    aspect:'N',  diff:'💀'},
+        {name:'Ha Ha',          aspect:'N',  diff:'⬛'},
+        {name:'Wizard',         aspect:'NW', diff:'🔵'},
+        {name:'Trick',          aspect:'NE', diff:'🔵'},
+        {name:'Upper Magic',    aspect:'N',  diff:'⬛'},
+    ],
+    haystack: [
+        {name:'The Face',       aspect:'N',  diff:'⬛'},
+        {name:'Main Run',       aspect:'NE', diff:'🔵'},
+        {name:'Ridgeline',      aspect:'NW', diff:'⬛'},
+        {name:'Witches',        aspect:'N',  diff:'💀'},
+    ],
+};
+
+// ════════════════════════════════════════════════════════════
+function classify(nd, zone) {
+    if (zone?.type === 'resort') return classifyResort(nd, zone);
+    const {currentTempC:rawCurT,maxTempC_72h:rawMaxT,minTempC_72h:rawMinT,
+           snow24h_cm:s24,snow72h_cm:s72,snow7d_cm:s7,
+           rain24h_mm:r24,rain72h_mm:r72,
+           maxWind24h_kmh:wind,snowDepthM:depthM,
+           snowfall_season_cm:seasonSnow=0} = nd;
+
+    // ── Elevation lapse rate correction ───────────────────
+    // Open-Meteo grid cells are terrain-averaged; summits are consistently colder.
+    // Actual VT lapse rate ~3°F/1000ft, but the HRRR model (3km grid) already
+    // captures much of the terrain elevation, so we apply only a modest offset.
+    // 1.5°F/1000ft above 1500ft baseline avoids over-cooling mid-elevation zones
+    // (Bromley SE 3284ft: -1.5°C  |  Stratton 3940ft: -2.0°C  |  Haystack 3420ft: -1.6°C)
+    const LAPSE_F = 1.5, ELEV_BASE = 1500;
+    const elevCorrC = (zone.elev ?? 0) > ELEV_BASE
+        ? -((zone.elev - ELEV_BASE) / 1000) * (LAPSE_F / 1.8)
+        : 0;
+    const curT = rawCurT + elevCorrC;
+    const maxT = rawMaxT + elevCorrC;
+    const minT = rawMinT + elevCorrC;
+
+    const fahr = c => (c*9/5+32).toFixed(0);
+    const inch  = cm => (cm/2.54).toFixed(1);
+    const depIn = (depthM*39.37).toFixed(0);
+
+    const month = new Date().getMonth();   // 0=Jan … 11=Dec
+    const hour  = new Date().getHours();
+
+    // Corn season: S/SE/SW/E eligible from Feb; all aspects Mar–May
+    const isCornSeason = month >= 2 && month <= 4;
+
+    // ── Solar calculation ─────────────────────────────────
+    // Insolation map: S = full midday sun; N = almost none
+    const solarMap = {N:.05, NE:.20, NW:.12, E:.55, W:.45, SE:.80, SW:.72, S:.95};
+    // Feb: slight boost as sun angle rises; Mar–May: 1.5× for corn eligibility
+    const springMult = isCornSeason ? 1.5 : (month === 1 ? 1.15 : 1.0);
+
+    // Canopy shade — how much of that solar actually hits the snow
+    // VT phenology: deciduous leaf-out ~May 1, leaf-off ~Oct 15
+    const isWinter = month <= 1 || month >= 10;  // Nov–Feb = bare deciduous
+    const canopyMult = ({
+        conifer:   0.45,                    // spruce-fir blocks ~55% year-round
+        mixed:     isWinter ? 0.65 : 0.50, // hardwoods bare in winter
+        deciduous: isWinter ? 0.85 : 0.45, // nearly bare in winter → ~15% block
+        open:      1.0                      // no cover
+    })[zone.canopy ?? 'open'];
+
+    // rawSolar: aspect direction relative to sun, no canopy — used for solarSoftening direction check
+    // solar: full canopy-adjusted heating that reaches the snowpack — used for corn/crust thresholds
+    const rawSolar = (solarMap[zone.aspect] ?? 0.5) * springMult;
+    const solar    = rawSolar * canopyMult;
+
+    // ── Base condition helpers ────────────────────────────
+    // Three independent signals — any one is sufficient:
+    //  ① Model snow depth > 6"  (direct but often under-estimates)
+    //  ② Recent snowfall (past 7d > 6")  (fresh storm base)
+    //  ③ Strong seasonal accumulation (> 40cm since Oct 1) AND not a warm/rainy meltout
+    //     Guard: if it's been >5°C AND raining for 72h, the season base is likely gone
+    const warmRainyMeltout = maxT > 5 && r72 > 15;  // prolonged warm+rain wipes a base
+    function hasBaseCheck() {
+        return depthM > 0.15
+            || s7 > 15
+            || (seasonSnow > 40 && !warmRainyMeltout);
+    }
+    const hasBase = hasBaseCheck();
+
+    // ── Key flags ─────────────────────────────────────────
+    // Rain refreeze → hard ice
+    const rainThenFreeze  = r72 > 3 && curT < -2;
+    // Freeze-thaw cycle (research: melt > 1°C day, refreeze < -4°C night)
+    const freezeThaw      = maxT > 1 && minT < -4;
+    // Solar surface softening: happens even when air temp is slightly below 0°C
+    // Key real-world fix: SE aspects sticky at -1°C while NE stays good
+    // Use rawSolar (pre-canopy) for direction check: canopy reduces intensity but
+    // doesn't change which way a slope faces. Threshold 0.55 = E/SE/S/SW/W aspects.
+    // This prevents conifer zones from showing identical quality on all 8 aspects —
+    // even in dense spruce-fir, a S-facing slope gets more solar than a N-facing one.
+    // Threshold -4°C (25°F): Feb sunshine on SE/S slopes actively softens snow even
+    // at these temps. Using -3 was too tight — after lapse-rate correction a 29°F
+    // model reading maps to -3.1°C, just barely blocking solarSoftening and falsely
+    // triggering Powder on sun-exposed aspects.
+    // Precise corn melt-freeze: 20s°F nights, 30–40°F days (defined early to gate solarSoftening)
+    const cornCycle       = maxT >= 0 && maxT <= 5 && minT >= -9 && minT <= -3;
+    const cornAspects     = ['S','SE','SW','E'];
+    const cornEligible    = isCornSeason || (month === 1 && cornAspects.includes(zone.aspect));
+    // On a proper corn day, suppress solarSoftening so Corn Snow fires instead of Wet/Heavy.
+    // Without this, any S/SE/SW/E aspect with curT > -4°C routes to Wet/Heavy at ②,
+    // never reaching Corn Snow at ⑥ — even on a perfect freeze-thaw day with no fresh snow.
+    const isCornDay       = cornEligible && cornCycle && solar > 0.45 && hasBase && s24 < 5;
+    const solarSoftening  = rawSolar > 0.55 && curT > -4 && hasBase
+                            && !(isCornDay && hour < 15 && curT <= 1);
+    // Active melt from above-freezing air
+    const activeMelt      = curT > 1 && hasBase;
+    // Active rain on snowpack
+    const rainOnSnow      = r24 > 5 && hasBase;
+    // Wind-slab conditions
+    // 40 km/h (25 mph) = genuine snow-transport wind; 8cm (3") = enough fresh snow to load slabs.
+    // Previously 25 km/h / 3cm fired constantly on open summits (every breezy day with any snow).
+    const windSlab        = wind > 40 && s72 > 8;
+
+    // ── CLASSIFICATION — priority order ──────────────────
+
+    // ① CRUSTY / ICE
+    // Rain refroze (hard ice) OR classic freeze-thaw with no fresh snow buffer.
+    // On corn days: crust only persists until ~10am (surface then warms to corn texture).
+    // On non-corn days: crust persists all day until solarSoftening takes over.
+    const crustyOk = isCornDay ? hour < 10 : !solarSoftening;
+    if((rainThenFreeze && s24 < 3) ||
+       (s24 < 8 && freezeThaw && solar > 0.25 && crustyOk))
+        return {quality:'Crusty/Ice', rating:1, color:'#78909C', emoji:'🧊', alert:'danger',
+            reason: rainThenFreeze
+                ? `${r72.toFixed(1)}mm rain refroze at ${fahr(curT)}°F. Hard icy surface.`
+                : `Melt-refreeze cycle (H:${fahr(maxT)}°F / L:${fahr(minT)}°F) on ${zone.aspect}-facing slope. Breakable crust over soft snow.`};
+
+    // ② WET / HEAVY
+    // Above-freezing air, OR rain on snow, OR solar cooking the surface
+    // This is what makes SE aspects sticky even when air temp is ~27-29°F
+    if(activeMelt || rainOnSnow || solarSoftening)
+        return {quality:'Wet/Heavy', rating:3, color:'#C62828', emoji:'💦', alert:'warning',
+            reason: activeMelt
+                ? `${fahr(curT)}°F — snow above freezing and saturating.`
+                : solarSoftening
+                    ? `Solar heating on ${zone.aspect} face softening surface (${fahr(curT)}°F air). Expect sticky, grabby conditions.`
+                    : `${r24.toFixed(1)}mm rain soaking the snowpack. Wet slab risk.`};
+
+    // ③ WIND SLAB
+    // 40+ km/h (25+ mph) sustained transport winds + 3"+ recent snow loads leeward slabs
+    if(windSlab)
+        return {quality:'Wind Slab', rating:4, color:'#FB8C00', emoji:'💨', alert:'warning',
+            reason:`Winds to ${wind.toFixed(0)} km/h (${(wind*0.621).toFixed(0)} mph) with ${inch(s72)}" recent snow. Dense slab on leeward aspects.`};
+
+    // ④ BLOWER POWDER
+    // Ultra-cold snowfall < -8°C produces stellar dendrites at ~15:1 snow-to-liquid ratio
+    if(s24 > 10 && curT < -8 && r72 < 0.5)
+        return {quality:'Blower Powder', rating:10, color:'#64B5F6', emoji:'❄️', alert:'excellent',
+            reason:`${inch(s24)}" in 24h at ${fahr(curT)}°F — ultra-light ~15:1 snow-to-liquid ratio. Exceptional conditions.`};
+
+    // ⑤ POWDER
+    // Normal cold snowfall (-3 to -8°C), ~10:1 snow-to-liquid, still dry and rideable
+    if((s24 > 8 || s72 > 20) && curT < -3 && r72 < 1 && maxT < 0)
+        return {quality:'Powder', rating:9, color:'#1565C0', emoji:'🎿', alert:'excellent',
+            reason:`${inch(s72)}" in 72h at ${fahr(curT)}°F. Cold temps maintaining ~10:1 snow-to-liquid ratio.`};
+
+    // ⑥ CORN SNOW
+    // Precise melt-freeze window: 20s°F nights refreeze, 30s–40s°F days soften top 2-3"
+    // Best window 10am–2pm; SE/S/SW/E eligible from Feb, all aspects from March
+    if(cornEligible && cornCycle && solar > 0.45 && hasBase && s24 < 5) {
+        const window = hour < 10 ? 'Still firm — wait until late morning.' :
+                       hour < 14 ? '🎯 Prime corn window (11am–1pm)!' :
+                                   'Softening past prime — may be getting wet.';
+        return {quality:'Corn Snow', rating:8, color:'#F9A825', emoji:'🌽', alert:'good',
+            reason:`Melt-freeze cycle on ${zone.aspect}-facing (H:${fahr(maxT)}°F / L:${fahr(minT)}°F). ${window}`};
+    }
+
+    // ⑦ SETTLED POWDER
+    // A few days old but still great — equi-temp metamorphism rounds grains
+    // without degrading quality; cold enough to stay dry and grippy.
+    // Two paths to qualify:
+    //   A) Recent snow in the past week (s7 > 4cm ~1.5") — classic recent storm base
+    //   B) Strong seasonal accumulation (> 50cm since Oct 1) + cold + no meltout
+    //      This catches the "it hasn't snowed in a week but Magic Mountain still has
+    //      a solid 2-foot base" scenario that was falsely calling Variable/Thin.
+    const seasonalBase = seasonSnow > 50 && !warmRainyMeltout;
+    if((s7 > 4 || seasonalBase) && curT < 0 && r72 < 3) {
+        const baseDesc = s7 > 4
+            ? `${inch(s7)}" in the past week`
+            : `${inch(seasonSnow)}" seasonal accumulation`;
+        return {quality:'Settled Powder', rating:7, color:'#00897B', emoji:'🌨️', alert:'good',
+            reason:`${baseDesc}. Grain-bonded settled snow — firm, consistent, great to ride. ${fahr(curT)}°F keeping it dry.`};
+    }
+
+    // FALLBACK — old/thin snowpack
+    const seasonStr = seasonSnow > 5 ? ` (${inch(seasonSnow)}" seasonal total)` : '';
+    return {quality:'Variable/Thin', rating:0, color:'#37474F', emoji:'❓', alert:'unknown',
+        reason:`${hasBase ? `~${depIn}" estimated base${seasonStr}, variable surfaces.` : `Very thin or undetectable snowpack${seasonStr}.`} Check recent reports.`};
+}
+
+// Run classify for all 8 compass aspects using the same weather data
+// Passes zone's canopy AND elev so solar shading + lapse rate apply correctly
+function classifyAllAspects(nd, zone) {
+    const res={};
+    ASPECTS.forEach(asp => res[asp] = classify(nd, {
+        aspect: asp,
+        canopy: zone?.canopy ?? 'open',
+        elev:   zone?.elev   ?? 0       // needed for lapse rate correction
+    }));
+    return res;
+}
+
+// ════════════════════════════════════════════════════════════
+// OPTIMAL TIME OF DAY
+//
+// Models the diurnal temperature curve (min ~6am, peak ~2pm) and
+// cross-references it with aspect-specific solar windows to tell
+// the rider the best time to hit a given slope.
+//
+// Solar windows are calibrated for VT latitude (~43°N):
+//   E-facing:  sun starts ~7:30am, peaks ~10am, done by noon
+//   SE-facing: sun starts ~8am,    peaks ~11am, done by 1pm
+//   S-facing:  sun starts ~9am,    peaks ~12:30pm, done by 4pm
+//   SW-facing: sun starts ~11am,   peaks ~2pm, done by 5pm
+//   W-facing:  sun starts ~1pm,    peaks ~3:30pm, done by 6pm
+//   N/NE/NW:   minimal direct solar all day
+// ════════════════════════════════════════════════════════════
+function getOptimalWindow(nd, zone) {
+    const asp    = zone.aspect;
+    const month  = new Date().getMonth();
+    const nowH   = new Date().getHours();
+    const q      = classify(nd, zone).quality;
+
+    // Format decimal hour → "9am", "11:30am", "2pm" etc.
+    const fmt = h => {
+        const hh = Math.floor(h), mm = Math.round((h % 1) * 60);
+        const p  = hh >= 12 ? 'pm' : 'am';
+        const d  = hh > 12 ? hh - 12 : (hh === 0 ? 12 : hh);
+        return mm >= 5 ? `${d}:${String(mm).padStart(2,'0')}${p}` : `${d}${p}`;
+    };
+    const fahr = c => Math.round(c * 9/5 + 32);
+
+    // ── Elevation lapse rate (same logic as classify) ────────
+    const LAPSE_F_OW = 1.5, ELEV_BASE_OW = 1500;
+    const elevCorrC_OW = (zone.elev ?? 0) > ELEV_BASE_OW
+        ? -((zone.elev - ELEV_BASE_OW) / 1000) * (LAPSE_F_OW / 1.8)
+        : 0;
+
+    // ── Diurnal temperature model ─────────────────────────
+    // Min ~6am, max ~2pm — cosine curve fit; apply elevation correction
+    const minT = (nd.minTempToday ?? nd.minTempC_72h) + elevCorrC_OW;
+    const maxT = (nd.maxTempToday ?? nd.maxTempC_72h) + elevCorrC_OW;
+    const avg  = (maxT + minT) / 2;
+    const amp  = (maxT - minT) / 2;
+    // T(h) = avg + amp * cos(2π(h-14)/24)  →  max at h=14 (2pm), min at h=2 (2am)
+    // Approximation: real VT min is ~6am but 2am is close enough for our 7am-5pm window
+    const tempAt = h => avg + amp * Math.cos(2 * Math.PI * (h - 14) / 24);
+
+    // ── Aspect solar windows (VT ~43°N, winter/spring) ───
+    // [start, peak, end] in decimal hours
+    const SOLAR = {
+        N:   null,
+        NE:  [7.5,  9.5,  11.5],
+        E:   [7.0,  10.0, 12.5],
+        SE:  [8.0,  11.0, 13.5],
+        S:   [9.0,  12.5, 16.0],
+        SW:  [10.5, 14.0, 17.5],
+        W:   [12.5, 15.5, 18.0],
+        NW:  [14.0, 16.5, 18.5]
+    };
+
+    // Corn windows: the sub-window within solar where surface is in the sweet spot
+    // (top 1-2" softened, base still firm)
+    const CORN = {
+        E:   [8.5,  11.0],
+        SE:  [9.5,  12.0],
+        S:   [10.5, 13.5],
+        SW:  [11.5, 14.5],
+        W:   [13.0, 16.0]
+    };
+
+    // Canopy + aspect solar (same logic as classify)
+    const isWinter   = month <= 1 || month >= 10;
+    const canopyMult = ({conifer:.45, mixed:isWinter?.65:.50, deciduous:isWinter?.85:.45, open:1.0})[zone.canopy??'open'];
+    const springMult = (month>=2&&month<=4) ? 1.5 : (month===1 ? 1.15 : 1.0);
+    const baseSolar  = (({N:.05,NE:.20,NW:.12,E:.55,W:.45,SE:.80,SW:.72,S:.95})[asp]??0.5) * springMult * canopyMult;
+    const isHighSolar = baseSolar > 0.50;
+
+    // When does solar softening start today? (tempAt > -3 on a high-solar aspect)
+    let softenHour = null;
+    if (isHighSolar) {
+        for (let h = 7; h <= 17; h++) {
+            if (tempAt(h) > -3) { softenHour = h; break; }
+        }
+    }
+
+    const isPast    = h => nowH >= h;
+    const tomorrowMin = nd.minTempTomorrow != null ? nd.minTempTomorrow + elevCorrC_OW : null;
+
+    // ── Recommendations ───────────────────────────────────
+
+    if (q === 'Blower Powder' || q === 'Powder') {
+        if (!isHighSolar) {
+            return { icon:'✅', label:'All day — conditions will hold',
+                detail:`${asp}-facing terrain with canopy protection keeps powder cold and dry. No rush, but morning is always safest.` };
+        }
+        if (!softenHour || softenHour >= 14) {
+            return { icon:'⏰', label:'Morning — cold forecast keeps it dry',
+                detail:`Even on the ${asp} face, temps stay cold enough to hold powder today. Ride anytime this morning.` };
+        }
+        return {
+            icon: isPast(softenHour) ? '⚡' : '⚡',
+            label: isPast(softenHour)
+                ? `Go now — softening underway since ${fmt(softenHour)}`
+                : `Before ${fmt(softenHour)} — solar softening expected`,
+            detail: isPast(softenHour)
+                ? `Solar heating has been cooking the ${asp} face since ~${fmt(softenHour)}. Still worth going but act fast.`
+                : `${asp}-facing solar hits at ${fmt(SOLAR[asp]?.[0]??9)}. Get there before ${fmt(softenHour)} to ride it cold and dry.`
+        };
+    }
+
+    if (q === 'Settled Powder') {
+        if (!isHighSolar) {
+            return { icon:'✅', label:'Morning through early afternoon',
+                detail:`${asp}-facing with canopy keeps settled snow firm and grippy. Morning preferred but conditions hold well.` };
+        }
+        if (!softenHour) {
+            return { icon:'✅', label:'All day — too cold to soften',
+                detail:`Despite the ${asp} sun exposure, temps stay below -3°C today. Settled powder holds.` };
+        }
+        return {
+            icon: isPast(softenHour) ? '⚠️' : '⏰',
+            label: isPast(softenHour)
+                ? `Softening now — go immediately`
+                : `Before ${fmt(softenHour)}`,
+            detail: isPast(softenHour)
+                ? `Solar warming on the ${asp} face has been softening settled snow since ~${fmt(softenHour)}. Conditions are turning sticky.`
+                : `Settled powder on the ${asp} face will start softening around ${fmt(softenHour)} (${fahr(tempAt(softenHour))}°F). Get there early.`
+        };
+    }
+
+    if (q === 'Corn Snow') {
+        const cw = CORN[asp];
+        if (cw) {
+            const [cs, ce] = cw;
+            const inNow    = nowH >= cs && nowH < ce;
+            const pastNow  = nowH >= ce;
+            if (pastNow) {
+                return { icon:'⌛', label:`Window passed (~${fmt(cs)}–${fmt(ce)})`,
+                    detail:`Today's corn window on the ${asp} face was ${fmt(cs)}–${fmt(ce)}. Surface is now getting too wet. Tomorrow should repeat if temps hold.` };
+            }
+            if (inNow) {
+                return { icon:'🎯', label:`RIGHT NOW — prime corn window!`,
+                    detail:`${asp}-facing corn is in the sweet spot (${fmt(cs)}–${fmt(ce)}). Top 1-2" soft, base still firm. Go!` };
+            }
+            return { icon:'🌽', label:`${fmt(cs)} – ${fmt(ce)}`,
+                detail:`Corn window for the ${asp} face. Surface firms overnight, softens to perfection during this window. Don't go too early (icy) or too late (wet).` };
+        }
+        return { icon:'🌽', label:'Mid-morning, watch the surface',
+            detail:`Corn is ready when the top 1-2" softens to a ball-bearing texture but the base stays firm. Time it by feel.` };
+    }
+
+    if (q === 'Wet/Heavy') {
+        if (tomorrowMin !== null && tomorrowMin < -4) {
+            const cornAspects = ['S','SE','SW','E'];
+            if (cornAspects.includes(asp) && (nd.maxTempTomorrow ?? maxT) >= 0) {
+                const cw = CORN[asp] ?? [10, 13];
+                return { icon:'🌅', label:`Tomorrow ${fmt(cw[0])}–${fmt(cw[1])}`,
+                    detail:`Tonight refreezes to ${fahr(tomorrowMin)}°F — that resets the melt-freeze cycle. Tomorrow's ${asp} face should be prime corn in the morning.` };
+            }
+            return { icon:'🌅', label:'Tomorrow morning',
+                detail:`Tonight's refreeze (${fahr(tomorrowMin)}°F low) should firm things back up. Check conditions early tomorrow before solar softening restarts.` };
+        }
+        return { icon:'⛔', label:'Pass on today',
+            detail:`Snow already saturated. Without a hard overnight freeze (forecast low ${maxT ? fahr(minT)+'°F' : 'unknown'}), conditions won't recover meaningfully.` };
+    }
+
+    // ── RESORT quality names ──────────────────────────────
+
+    if (q === 'Spring Corn') {
+        const cw = CORN[asp];
+        if (cw) {
+            const [cs, ce] = cw;
+            const inNow   = nowH >= cs && nowH < ce;
+            const pastNow = nowH >= ce;
+            if (pastNow) {
+                return { icon:'⌛', label:`Window passed (~${fmt(cs)}–${fmt(ce)})`,
+                    detail:`Today's corn window on the ${asp} face was ${fmt(cs)}–${fmt(ce)}. Surface is firming back up. Tomorrow should repeat if overnight temps hold.` };
+            }
+            if (inNow) {
+                return { icon:'🎯', label:`RIGHT NOW — prime corn window!`,
+                    detail:`${asp}-facing corn is in the sweet spot (${fmt(cs)}–${fmt(ce)}). Top 1-2" soft, base still firm. Go now!` };
+            }
+            return { icon:'🌽', label:`${fmt(cs)} – ${fmt(ce)}`,
+                detail:`Surface firms overnight, softens to perfect corn during this window on the ${asp} face. Don't go early (still icy) or late (gets wet).` };
+        }
+        return { icon:'🌽', label:'Mid-morning, watch the surface',
+            detail:`Corn is ready when the top 1-2" softens to ball-bearing texture but the base stays firm. Time it by feel on the ${asp} face.` };
+    }
+
+    if (q === 'Prime Grooming') {
+        // Check if tonight refreezes enough to set up corn tomorrow
+        const cornAspects_pg = ['S','SE','SW','E','W'];
+        const isCornEligible_pg = (month >= 2 && month <= 4) || (month === 1 && cornAspects_pg.includes(asp));
+        if (isCornEligible_pg && tomorrowMin !== null && tomorrowMin < -2 &&
+            (nd.maxTempTomorrow ?? maxT) >= 0) {
+            const cw = CORN[asp] ?? [10.5, 13.5];
+            return { icon:'🌅', label:`Tomorrow ${fmt(cw[0])}–${fmt(cw[1])} — corn expected`,
+                detail:`Surface firmed back up. Tonight refreezes to ${fahr(tomorrowMin)}°F — tomorrow's ${asp} face should be prime corn. Hit it between ${fmt(cw[0])} and ${fmt(cw[1])} before it gets too wet.` };
+        }
+        return { icon:'⭐', label:'All day — especially morning',
+            detail:`Groomers set firm and fast overnight. Cold corduroy holds well through midday on the ${asp} face. Best carving before any afternoon softening.` };
+    }
+
+    if (q === 'Powder Day') {
+        if (!isHighSolar) {
+            return { icon:'✅', label:'All day — powder will hold',
+                detail:`${asp}-facing groomed runs keep fresh snow cold and dry. Morning is safest but conditions should hold through the day.` };
+        }
+        if (!softenHour || softenHour >= 14) {
+            return { icon:'⏰', label:'Morning — cold forecast keeps it dry',
+                detail:`Even on the ${asp} face, temps stay cold enough to hold powder. Get first chair for the best groomers.` };
+        }
+        return {
+            icon:'⚡',
+            label: isPast(softenHour)
+                ? `Go now — softening since ${fmt(softenHour)}`
+                : `Before ${fmt(softenHour)} — solar warming expected`,
+            detail: isPast(softenHour)
+                ? `Solar heating on the ${asp} face since ~${fmt(softenHour)}. Still good but act fast before groomers get heavy.`
+                : `Get to ${asp}-facing runs before ${fmt(softenHour)} to ride fresh snow before it warms and gets grabby.`
+        };
+    }
+
+    if (q === 'Icy/Hard Pack') {
+        const cornAspects_ih = ['S','SE','SW','E','W'];
+        const isCornEligible_ih = (month >= 2 && month <= 4) || (month === 1 && cornAspects_ih.includes(asp));
+        if (isCornEligible_ih && maxT >= 0 && minT < -2) {
+            const cw = CORN[asp];
+            if (cw) {
+                const [cs, ce] = cw;
+                const inNow = nowH >= cs && nowH < ce;
+                return { icon: inNow ? '🎯' : '🌽',
+                    label: inNow ? 'NOW — softening to corn!' : `${fmt(cs)}–${fmt(ce)} — wait for corn window`,
+                    detail:`Hard groomed surface will soften to rideable corn on the ${asp} face during the solar window. Stick to groomers; off-piste stays bulletproof.` };
+            }
+        }
+        return { icon:'⭐', label:'Early morning — before solar softening',
+            detail:`Hard groomed surface is fastest and most predictable first thing. Edges bite well. ${asp}-facing runs will soften later if temps allow.` };
+    }
+
+    if (q === 'Wet/Slushy') {
+        if (tomorrowMin !== null && tomorrowMin < -4) {
+            const cornAspects_ws = ['S','SE','SW','E','W'];
+            const isCornEligible_ws = (month >= 2 && month <= 4) || (month === 1 && cornAspects_ws.includes(asp));
+            if (isCornEligible_ws && (nd.maxTempTomorrow ?? maxT) >= 0) {
+                const cw = CORN[asp] ?? [10.5, 13.5];
+                return { icon:'🌅', label:`Tomorrow ${fmt(cw[0])}–${fmt(cw[1])} — corn expected`,
+                    detail:`Tonight freezes to ${fahr(tomorrowMin)}°F — that resets the melt-freeze cycle. Tomorrow's ${asp} face should be prime corn.` };
+            }
+            return { icon:'🌅', label:'Tomorrow morning',
+                detail:`Tonight's refreeze (${fahr(tomorrowMin)}°F) should firm the surface back up. Check grooming report early.` };
+        }
+        return { icon:'⛔', label:'Skip the afternoon',
+            detail:`Wet and grabby on the ${asp} face. Without a hard overnight freeze, conditions stay slushy tomorrow too. Morning is best if you must go.` };
+    }
+
+    if (q === 'Good Conditions') {
+        if (!isHighSolar) {
+            return { icon:'✅', label:'All day',
+                detail:`${asp}-facing terrain holds firm, consistent snow without significant solar softening. Groomed runs should be good throughout.` };
+        }
+        const sw = SOLAR[asp];
+        if (sw) {
+            return { icon:'⏰', label:`Morning through ~${fmt(sw[1])}`,
+                detail:`Cold firm groomers this morning on the ${asp} face. Solar heating peaks around ${fmt(sw[1])} and may start softening the surface — morning is the sweet spot.` };
+        }
+        return { icon:'✅', label:'Morning preferred',
+            detail:`Good groomed conditions. Cold morning keeps snow firm; surface may vary through the afternoon on the ${asp} face.` };
+    }
+
+    if (q === 'Wind Slab') {
+        return { icon:'⚠️', label:'Check conditions before committing',
+            detail:`Wind slab risk is highest on leeward aspects right now. Wait for winds to calm and give the slab 12-24h to settle or bond.` };
+    }
+
+    if (q === 'Crusty/Ice') {
+        const cornAspects = ['S','SE','SW','E'];
+        if (cornAspects.includes(asp) && maxT >= 0 && minT < -2) {
+            const cw = CORN[asp];
+            if (cw) {
+                const [cs, ce] = cw;
+                const inNow = nowH >= cs && nowH < ce;
+                return {
+                    icon: inNow ? '🎯' : '🌽',
+                    label: inNow ? 'NOW — crust softening to corn!' : `${fmt(cs)} – ${fmt(ce)}`,
+                    detail: `Icy crust from overnight freeze should soften to rideable corn on the ${asp} face during peak solar. Time it right or the window is narrow.`
+                };
+            }
+        }
+        return { icon:'⛔', label:'Not today — wait for snow or corn conditions',
+            detail:`Icy/crusty on the ${asp} face won't improve significantly today. Check back after a storm or when a solid melt-freeze cycle sets up.` };
+    }
+
+    // Variable/Thin
+    return { icon:'❓', label:'Check local beta first',
+        detail:`Variable snowpack — conditions can differ a lot from the forecast model. Worth checking with locals or a recent trip report.` };
+}
+
+// ════════════════════════════════════════════════════════════
+// ASPECT SELECTION — called when a wedge or grid cell is clicked
+// Shows per-aspect snow quality + optimal time in the detail card
+// ════════════════════════════════════════════════════════════
+function selectAspect(zoneId, asp) {
+    const c = cache[zoneId];
+    const z = ZONES.find(z => z.id === zoneId);
+    if (!c?.nd || !z) return;
+
+    const isTmr   = activeTab === 'tomorrow';
+    const nd       = isTmr ? buildTomorrowNd(c.nd) : c.nd;
+    // Build a virtual zone for the clicked aspect (same canopy/elev, different direction)
+    const tempZone = { ...z, aspect: asp };
+    const q  = (z.type==='resort' ? classifyResort : classify)(nd, tempZone);
+    const ow = getOptimalWindow(nd, tempZone);
+
+    // ── Dim all wedge paths, highlight the clicked one ───────
+    ASPECTS.forEach(a => {
+        const path = document.getElementById(`asp-path-${zoneId}-${a}`);
+        if (!path) return;
+        if (a === asp) {
+            path.setAttribute('stroke', '#ffffff');
+            path.setAttribute('stroke-width', '2.5');
+            path.setAttribute('opacity', '1');
+        } else {
+            path.setAttribute('stroke', 'rgba(0,0,0,.25)');
+            path.setAttribute('stroke-width', '0.6');
+            path.setAttribute('opacity', '0.38');
+        }
+    });
+
+    // ── Highlight selected grid cell, clear others ───────────
+    document.querySelectorAll('.asp-cell').forEach(el => el.classList.remove('selected'));
+    const cellEl = document.getElementById(`asp-cell-${zoneId}-${asp}`);
+    if (cellEl) cellEl.classList.add('selected');
+
+    // Update the arc first — works on both today and tomorrow tabs.
+    // Must happen before the aspectDetail guard because the tomorrow panel has no #aspectDetail.
+    const arcBox = document.getElementById('dayArcBox');
+    if (arcBox) arcBox.innerHTML = renderDayArc(nd, tempZone, !isTmr);
+
+    // ── Render detail card (today tab only) ───────────────────
+    const el = document.getElementById('aspectDetail');
+    if (!el) return;
+    const isPrimary = asp === z.aspect;
+
+    el.style.display = 'block';
+    el.innerHTML = `
+        <div class="ad-header">
+            <span style="font-size:1.1rem">${q.emoji}</span>
+            <span class="ad-asp-label">${asp}-facing</span>
+            ${isPrimary ? '<span class="ad-primary-badge">Primary Aspect</span>' : ''}
+        </div>
+        <div class="ad-quality" style="color:${q.color}">${q.quality}</div>
+        <p class="ad-reason">${q.reason}</p>`;
+
+    // Smooth-scroll so the card is visible
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ════════════════════════════════════════════════════════════
+// ASPECT ROSE SVG
+// Generates a compass rose with 8 color-coded sectors.
+// primaryAsp = the zone's main aspect (highlighted with white border).
+// ════════════════════════════════════════════════════════════
+function buildRoseSVG(aqs, primaryAsp, size=170, zoneId=null) {
+    const cx=size/2, cy=size/2;
+    const outerR=size*0.42, innerR=size*0.15;
+    const f=n=>n.toFixed(2);
+    const toRad=d=>(d-90)*Math.PI/180; // 0° = top = North
+
+    function sectorPath(asp) {
+        const deg=ASP_DEG[asp], q=aqs[asp], isPrim=asp===primaryAsp;
+        const s=toRad(deg-22.5), e=toRad(deg+22.5);
+        const xi1=cx+innerR*Math.cos(s),yi1=cy+innerR*Math.sin(s);
+        const xo1=cx+outerR*Math.cos(s),yo1=cy+outerR*Math.sin(s);
+        const xo2=cx+outerR*Math.cos(e),yo2=cy+outerR*Math.sin(e);
+        const xi2=cx+innerR*Math.cos(e),yi2=cy+innerR*Math.sin(e);
+        const p=`M${f(xi1)} ${f(yi1)} L${f(xo1)} ${f(yo1)} A${outerR} ${outerR} 0 0 1 ${f(xo2)} ${f(yo2)} L${f(xi2)} ${f(yi2)} A${innerR} ${innerR} 0 0 0 ${f(xi1)} ${f(yi1)}Z`;
+        const idAttr  = zoneId ? ` id="asp-path-${zoneId}-${asp}"` : '';
+        const click   = zoneId ? ` onclick="selectAspect('${zoneId}','${asp}')" style="cursor:pointer"` : '';
+        return `<path d="${p}" fill="${q.color}" stroke="${isPrim?'#fff':'rgba(0,0,0,.3)'}" stroke-width="${isPrim?2:.6}" opacity="${isPrim?1:.85}" title="${asp}: ${q.quality}"${idAttr}${click}/>`;
+    }
+
+    // Cardinal labels (N E S W outside ring)
+    const lR=outerR+11;
+    const cardinals=[
+        {t:'N',x:cx,      y:cy-lR-1,  a:'middle'},
+        {t:'E',x:cx+lR+3, y:cy+4,     a:'start'},
+        {t:'S',x:cx,      y:cy+lR+12, a:'middle'},
+        {t:'W',x:cx-lR-3, y:cy+4,     a:'end'},
+    ];
+    const lbls=cardinals.map(l=>`<text x="${f(l.x)}" y="${f(l.y)}" fill="#6b93b0" font-size="9" font-family="sans-serif" text-anchor="${l.a}" font-weight="700">${l.t}</text>`).join('');
+
+    // Small tick marks at intercardinal points (NE NW SE SW)
+    const ticks=[45,135,225,315].map(d=>{
+        const r=toRad(d),t1=outerR+2,t2=outerR+7;
+        return `<line x1="${f(cx+t1*Math.cos(r))}" y1="${f(cy+t1*Math.sin(r))}" x2="${f(cx+t2*Math.cos(r))}" y2="${f(cy+t2*Math.sin(r))}" stroke="#2d4159" stroke-width="1.5"/>`;
+    }).join('');
+
+    // North arrow in center hole
+    const arrowH=innerR*0.7, arrowW=3;
+    const arrow=`<polygon points="${f(cx)},${f(cy-arrowH)} ${f(cx-arrowW)},${f(cy+arrowW)} ${f(cx+arrowW)},${f(cy+arrowW)}" fill="#6b93b0"/>`;
+    const center=`<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(innerR-1)}" fill="#1b2d42" stroke="#2d4159" stroke-width="1"/>`;
+
+    return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">`+
+        ASPECTS.map(sectorPath).join('')+ticks+center+arrow+lbls+`</svg>`;
+}
+
+// Small mini-rose for zone list
+function buildMiniRoseSVG(aqs, size=28) {
+    const cx=size/2, cy=size/2, outerR=size*0.45, innerR=size*0.12;
+    const f=n=>n.toFixed(2), toRad=d=>(d-90)*Math.PI/180;
+    const sectors=ASPECTS.map(asp=>{
+        const q=aqs[asp],deg=ASP_DEG[asp],s=toRad(deg-22.5),e=toRad(deg+22.5);
+        const xi1=cx+innerR*Math.cos(s),yi1=cy+innerR*Math.sin(s);
+        const xo1=cx+outerR*Math.cos(s),yo1=cy+outerR*Math.sin(s);
+        const xo2=cx+outerR*Math.cos(e),yo2=cy+outerR*Math.sin(e);
+        const xi2=cx+innerR*Math.cos(e),yi2=cy+innerR*Math.sin(e);
+        const p=`M${f(xi1)} ${f(yi1)} L${f(xo1)} ${f(yo1)} A${outerR} ${outerR} 0 0 1 ${f(xo2)} ${f(yo2)} L${f(xi2)} ${f(yi2)} A${innerR} ${innerR} 0 0 0 ${f(xi1)} ${f(yi1)}Z`;
+        return `<path d="${p}" fill="${q.color}" stroke="rgba(0,0,0,.2)" stroke-width=".4"/>`;
+    }).join('');
+    const ctr=`<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(innerR-.5)}" fill="#1b2d42"/>`;
+    return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${sectors}${ctr}</svg>`;
+}
+
+
+// ════════════════════════════════════════════════════════════
+// FETCH HELPERS — timeout + localStorage cache (30-min TTL)
+// ════════════════════════════════════════════════════════════
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+function wxCacheGet(key) {
+    try {
+        // localStorage persists across tab closes (unlike sessionStorage which clears on iOS
+        // every time the tab is closed), so the 30-min TTL actually helps on mobile.
+        const raw = localStorage.getItem('wx_' + key);
+        if (!raw) return null;
+        const {ts, payload} = JSON.parse(raw);
+        if (Date.now() - ts > CACHE_TTL) return null;
+        return payload;
+    } catch { return null; }
+}
+function wxCacheSet(key, payload) {
+    try { localStorage.setItem('wx_' + key, JSON.stringify({ts:Date.now(), payload})); }
+    catch {} // ignore private-browsing / storage-full errors
+}
+
+async function fetchWithTimeout(url, ms=10000) {
+    // AbortController actually cancels the underlying network request on iOS —
+    // Promise.race alone leaves ghost requests draining the cellular connection.
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), ms);
+    try {
+        const r = await fetch(url, { signal: controller.signal });
+        clearTimeout(id);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+    } catch(e) {
+        clearTimeout(id);
+        if (e.name === 'AbortError') throw new Error(`Timed out after ${ms/1000}s`);
+        throw e;
+    }
+}
+
+// Retry up to 2 times with backoff (1.5s, 3s) — 3 retries at 20s each = 60s hang on mobile
+async function fetchWithRetry(url, ms=10000, attempts=2) {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+        try { return await fetchWithTimeout(url, ms); }
+        catch(e) {
+            lastErr = e;
+            if (i < attempts - 1) {
+                await new Promise(r => setTimeout(r, 1500 * Math.pow(2, i)));
+            }
+        }
+    }
+    // Friendlier message for network-level failures
+    if (lastErr.message === 'Failed to fetch' || lastErr.message.includes('NetworkError') || lastErr.name === 'AbortError') {
+        throw new Error('Network unavailable — check your connection or disable any ad blocker for this page');
+    }
+    throw lastErr;
+}
+
+// ════════════════════════════════════════════════════════════
+// OPEN-METEO — batch forecast for all zones in one round-trip
+// ════════════════════════════════════════════════════════════
+const FORECAST_DAYS = 30;
+
+// Single forecast call for all 10 zones (comma-separated lat/lon → array response)
+async function fetchAllZonesBatch() {
+    const lats = ZONES.map(z => z.lat).join(',');
+    const lons = ZONES.map(z => z.lon).join(',');
+    const url =
+        `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
+        `&current=temperature_2m,snow_depth,windspeed_10m,rain,snowfall` +
+        `&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,` +
+        `snowfall_sum,rain_sum,windspeed_10m_max` +
+        `&past_days=${FORECAST_DAYS}&forecast_days=3&timezone=America%2FNew_York`;
+    const data = await fetchWithRetry(url, 12000);
+    return Array.isArray(data) ? data : [data];
+}
+
+// Single archive call for all zones (same date window for every zone)
+async function fetchArchiveBatch(startDate, endDate) {
+    const lats = ZONES.map(z => z.lat).join(',');
+    const lons = ZONES.map(z => z.lon).join(',');
+    const url =
+        `https://archive-api.open-meteo.com/v1/archive?latitude=${lats}&longitude=${lons}` +
+        `&start_date=${startDate}&end_date=${endDate}&daily=snowfall_sum&timezone=America%2FNew_York`;
+    const data = await fetchWithRetry(url, 12000);
+    return Array.isArray(data) ? data : [data];
+}
+
+// Hourly temps batch — today + tomorrow only (48h), used for overnight refreeze model
+// Indices 17-31 = 5pm today → 7am tomorrow = tonight's actual overnight window
+async function fetchHourlyBatch() {
+    const lats = ZONES.map(z => z.lat).join(',');
+    const lons = ZONES.map(z => z.lon).join(',');
+    const url =
+        `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
+        `&hourly=temperature_2m&past_days=0&forecast_days=2&timezone=America%2FNew_York`;
+    const data = await fetchWithRetry(url, 10000);
+    return Array.isArray(data) ? data : [data];
+}
+
+// Per-zone fallback (used only when batch fails)
+async function fetchOpenMeteo(lat, lon) {
+    const url =
+        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&current=temperature_2m,snow_depth,windspeed_10m,rain,snowfall` +
+        `&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,` +
+        `snowfall_sum,rain_sum,windspeed_10m_max` +
+        `&past_days=${FORECAST_DAYS}&forecast_days=3&timezone=America%2FNew_York`;
+    const data = await fetchWithRetry(url);
+    const now = new Date();
+    const seasonStart = new Date(now.getMonth() < 7 ? now.getFullYear() - 1 : now.getFullYear(), 9, 15);
+    const windowStart = new Date(now); windowStart.setDate(windowStart.getDate() - FORECAST_DAYS);
+    data._archiveSnowCm = 0;
+    if (seasonStart < windowStart) {
+        const s = seasonStart.toISOString().slice(0, 10);
+        const e = new Date(windowStart - 86400000).toISOString().slice(0, 10);
+        try {
+            const arch = await fetchWithRetry(
+                `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}` +
+                `&start_date=${s}&end_date=${e}&daily=snowfall_sum&timezone=America%2FNew_York`
+            );
+            if (arch?.daily?.snowfall_sum) {
+                data._archiveSnowCm = arch.daily.snowfall_sum.reduce((a, v) => a + (v ?? 0), 0);
+            }
+        } catch (_) {}
+    }
+    return data;
+}
+
+// ════════════════════════════════════════════════════════════
+// LAZY CHART.JS — loaded on first zone-detail open
+// ════════════════════════════════════════════════════════════
+let _chartJsPromise = null;
+function ensureChartJs() {
+    if (window.Chart) return Promise.resolve();
+    if (!_chartJsPromise) {
+        _chartJsPromise = new Promise((res, rej) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js';
+            s.onload = res; s.onerror = () => rej(new Error('Chart.js failed to load'));
+            document.head.appendChild(s);
+        });
+    }
+    return _chartJsPromise;
+}
+
+function normalizeOpenMeteo(data, hourlyData=null) {
+    if (!data || !data.daily || !data.daily.time?.length) {
+        throw new Error('Open-Meteo returned unexpected data structure');
+    }
+    const curr = data.current ?? {};
+    const d    = data.daily;
+
+    // Find today's index in the daily array by date string comparison
+    const today = getTodayNY();
+    let ci = 0;
+    for (let i = 0; i < d.time.length; i++) { if (d.time[i] <= today) ci = i; }
+
+    const sumD = (arr, s, e) =>
+        arr.slice(Math.max(0,s), e+1).reduce((a,b) => a+(b??0), 0);
+    const maxD = (arr, s, e) => {
+        const v = arr.slice(Math.max(0,s), e+1).filter(x => x!=null);
+        return v.length ? Math.max(...v) : null;
+    };
+    const minD = (arr, s, e) => {
+        const v = arr.slice(Math.max(0,s), e+1).filter(x => x!=null);
+        return v.length ? Math.min(...v) : null;
+    };
+
+    const curT   = curr.temperature_2m ?? d.temperature_2m_max[ci] ?? 0;
+    const l3s    = ci - 2;  // 3-day window start
+    const l7s    = ci - 6;  // 7-day window start
+
+    // ── Seasonal snowfall: Oct 1 of current ski season → today ───────────
+    // This is the key fix for base-depth accuracy. The model snow_depth field
+    // is unreliable on mountainous terrain; cumulative seasonal snowfall is a
+    // far better proxy for whether a real base exists.
+    const now        = new Date();
+    const nowMonth   = now.getMonth(); // 0=Jan…11=Dec
+    const nowYear    = now.getFullYear();
+    // Season starts Oct 15 of the previous calendar year if we're Jan–Jun,
+    // otherwise Oct 15 of the current year (e.g. Feb 2026 → season start Oct 15 2025)
+    const seasonStartYear = nowMonth < 7 ? nowYear - 1 : nowYear;
+    const seasonStart     = `${seasonStartYear}-10-15`;
+
+    let snowfall_season_cm = data._archiveSnowCm ?? 0; // early-season gap from archive API
+    for (let i = 0; i <= ci; i++) {
+        if (d.time[i] >= seasonStart) snowfall_season_cm += d.snowfall_sum[i] ?? 0;
+    }
+
+    // Rough compacted-base estimate: seasonal snow * 0.35 compaction factor,
+    // capped conservatively. Used as a fallback when model snow_depth seems off.
+    // 100cm seasonal snowfall ≈ 35cm (~14") estimated base after compaction.
+    const estimatedBaseM = Math.min(snowfall_season_cm * 0.0035, 2.5); // 0.0035 = 0.35/100 * cm→m
+
+    // Chart: one entry per day, isForecast = days after today
+    const chartDays = d.time.map((t, i) => {
+        const dt   = new Date(t + 'T12:00:00');
+        const label = isNaN(dt) ? t : dt.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+        const mean  = d.temperature_2m_mean?.[i];
+        const avgTempF = (mean != null ? mean : ((d.temperature_2m_max[i]??0)+(d.temperature_2m_min[i]??0))/2) * 9/5 + 32;
+        return { label, avgTempF, snowIn: +((d.snowfall_sum[i]??0)/2.54).toFixed(2), isForecast: i > ci };
+    });
+
+    return {
+        source:'OpenMeteo', stationId:null, stationName:null, stationDistMi:null,
+        currentTempC:    curT,
+        maxTempC_72h:    maxD(d.temperature_2m_max, l3s, ci) ?? curT,
+        minTempC_72h:    minD(d.temperature_2m_min, l3s, ci) ?? curT,
+        // Today's specific forecast min/max (for diurnal curve in optimal window calc)
+        maxTempToday:    d.temperature_2m_max[ci]   ?? curT,
+        minTempToday:    d.temperature_2m_min[ci]   ?? curT,
+        // Tomorrow's temps (for overnight refreeze / next-day corn potential)
+        maxTempTomorrow: d.temperature_2m_max[ci+1] ?? null,
+        minTempTomorrow: d.temperature_2m_min[ci+1] ?? null,
+        // Tomorrow's full forecast (for Tomorrow tab)
+        snowTomorrow_cm:  d.snowfall_sum[ci+1]          ?? 0,
+        rainTomorrow_mm:  d.rain_sum[ci+1]               ?? 0,
+        windTomorrow_kmh: d.windspeed_10m_max[ci+1]      ?? 0,
+        // Day-after-tomorrow (becomes "tomorrow" when classifying tomorrow's nd)
+        maxTempDay2: d.temperature_2m_max[ci+2] ?? null,
+        minTempDay2: d.temperature_2m_min[ci+2] ?? null,
+        snow24h_cm:      d.snowfall_sum[ci] ?? 0,
+        snow72h_cm:      sumD(d.snowfall_sum, l3s, ci),
+        snow7d_cm:       sumD(d.snowfall_sum, l7s, ci),
+        rain24h_mm:      d.rain_sum[ci] ?? 0,
+        rain72h_mm:      sumD(d.rain_sum, l3s, ci),
+        maxWind24h_kmh:  d.windspeed_10m_max[ci] ?? 0,
+        // snow_depth from model is unreliable on complex terrain;
+        // use the larger of model depth OR our compaction-derived estimate
+        snowDepthM:      Math.max(curr.snow_depth ?? 0, estimatedBaseM),
+        snowfall_season_cm,   // full Oct 1 → today accumulation
+        estimatedBaseM,       // compaction estimate (for display/debug)
+        // Tonight's actual hourly temps: 5pm today → 7am tomorrow (15 values, 1 hr each).
+        // Used by getOvernightRefreeze() instead of cosine-curve approximation when available.
+        // Indices 17-31 from Open-Meteo hourly array (past_days=0, midnight-anchored local time).
+        tonightTemps: hourlyData?.hourly?.temperature_2m?.slice(17, 32) ?? null,
+        chartDays
+    };
+}
+
+
+// ════════════════════════════════════════════════════════════
+// MAP
+// ════════════════════════════════════════════════════════════
+let map, markers={}, wedgeLayers={}, weatherChart=null;
+let cache={}, activeId=null, activeTab='today', activeTrailHour='now';
+let topoLayer, satLayer, satActive=false;
+const WEDGE_RADIUS=1400; // meters
+
+function toggleSatellite() {
+    satActive = !satActive;
+    if (satActive) {
+        map.removeLayer(topoLayer);
+        satLayer.addTo(map);
+        // Bring wedge layers above tiles
+        Object.values(wedgeLayers).forEach(ws => ws.forEach(w => w.bringToFront?.()));
+    } else {
+        map.removeLayer(satLayer);
+        topoLayer.addTo(map);
+    }
+    const btn = document.getElementById('satBtn');
+    btn.classList.toggle('active', satActive);
+    btn.textContent = satActive ? '🗺️ Topo' : '🛰️ Satellite';
+}
+
+function initMap() {
+    // On mobile, start a touch-friendlier zoom level
+    const startZoom = window.innerWidth <= 768 ? 9 : 10;
+    map=L.map('map',{center:[43.08,-72.86],zoom:startZoom});
+    topoLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'© <a href="https://opentopomap.org">OpenTopoMap</a>'});
+    satLayer  = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'© Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP'});
+    topoLayer.addTo(map);
+
+    // Placeholder center markers (small dot + label)
+    ZONES.forEach(z=>{
+        const m=L.marker([z.lat,z.lon],{icon:dotIcon('#546E7A',false)})
+            .addTo(map).on('click',()=>selectZone(z.id));
+        m.bindTooltip(z.name,{direction:'top'});
+        markers[z.id]=m;
+    });
+
+    // Legend
+    const leg=L.control({position:'bottomleft'});
+    leg.onAdd=()=>{
+        const d=L.DomUtil.create('div','map-legend');
+        d.innerHTML=`<strong>🌲 Backcountry</strong>
+            <div class="leg-row"><span class="leg-dot" style="background:#64B5F6"></span>❄️ Blower Powder</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#1565C0"></span>🎿 Powder</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#00897B"></span>🌨️ Settled Powder</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#F9A825"></span>🌽 Corn Snow</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#FB8C00"></span>💨 Wind Slab</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#C62828"></span>💦 Wet/Heavy</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#78909C"></span>🧊 Crusty/Ice</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#37474F"></span>❓ Variable/Thin</div>
+            <strong style="margin-top:6px">🏔 Resort</strong>
+            <div class="leg-row"><span class="leg-dot" style="background:#1565C0"></span>❄️ Powder Day</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#00897B"></span>⭐ Prime Grooming</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#F9A825"></span>🌽 Spring Corn</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#1976D2"></span>🎿 Good Conditions</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#C62828"></span>💦 Wet/Slushy</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#78909C"></span>🧊 Icy/Hard Pack</div>
+            <div class="leg-row"><span class="leg-dot" style="background:#37474F"></span>❓ Variable</div>
+            <div style="margin-top:5px;font-size:.6rem;color:#4d6a80">Solid border = primary aspect</div>`;
+        return d;
+    };
+    leg.addTo(map);
+}
+
+function dotIcon(color, active) {
+    const sz=active?22:16;
+    return L.divIcon({
+        className:'',
+        html:`<div style="background:${color};border:${active?'2px solid #4fc3f7':'2px solid rgba(255,255,255,.7)'};border-radius:50%;width:${sz}px;height:${sz}px;box-shadow:0 2px 6px rgba(0,0,0,.7)"></div>`,
+        iconSize:[sz,sz],iconAnchor:[sz/2,sz/2]
+    });
+}
+
+// Draw (or redraw) the 8 directional wedge polygons for a zone
+function updateWedges(zoneId) {
+    // Remove old wedges
+    if(wedgeLayers[zoneId]){ wedgeLayers[zoneId].forEach(p=>map.removeLayer(p)); }
+    const c=cache[zoneId]; if(!c || !c.aspectQualities) return;
+    const z=ZONES.find(z=>z.id===zoneId);
+    const aqs=c.aspectQualities;
+    const isActive=zoneId===activeId;
+
+    wedgeLayers[zoneId]=ASPECTS.map(asp=>{
+        const q=aqs[asp], pts=wedgePoly(z.lat,z.lon,ASP_DEG[asp],WEDGE_RADIUS);
+        const isPrimary = asp === z.aspect;
+        return L.polygon(pts,{
+            fillColor:q.color,
+            fillOpacity: isActive ? 0.82 : 0.68,
+            color: 'rgba(0,0,0,0.45)',
+            weight: isPrimary ? 2.5 : 1,
+            opacity: 1,
+            dashArray: isPrimary ? null : '4,3'
+        }).on('click',()=>selectZone(zoneId)).addTo(map);
+    });
+
+    // Bring marker to front (only available on path layers, not markers)
+    if(markers[zoneId]?.getElement) markers[zoneId].getElement()?.style && (markers[zoneId].getElement().style.zIndex=1000);
+}
+
+function refreshMarker(id) {
+    const c=cache[id], isActive=id===activeId;
+    const color=c?.quality?.color ?? '#546E7A';
+    if(markers[id]) markers[id].setIcon(dotIcon(color,isActive));
+}
+
+// ════════════════════════════════════════════════════════════
+// ZONE SELECTION
+// ════════════════════════════════════════════════════════════
+function selectZone(id) {
+    const prev=activeId; activeId=id;
+    // Refresh old zone (less intense wedge opacity)
+    if(prev){ refreshMarker(prev); updateWedges(prev); }
+    refreshMarker(id); updateWedges(id);
+
+    document.querySelectorAll('.zitem').forEach(e=>e.classList.remove('active'));
+    const li=document.getElementById(`li-${id}`); if(li) li.classList.add('active');
+
+    renderDetail(id);
+    const z=ZONES.find(z=>z.id===id); if(z) map.panTo([z.lat,z.lon]);
+
+    // On mobile: scroll sidebar into view so the detail panel is visible
+    if (window.innerWidth <= 768) {
+        requestAnimationFrame(() => {
+            document.querySelector('.sidebar')
+                ?.scrollIntoView({behavior:'smooth', block:'start'});
+            // Also reset zone-detail scroll to top
+            const zd = document.getElementById('zoneDetail');
+            if (zd) zd.scrollTop = 0;
+        });
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+// DAY ARC — hourly classification + timeline rendering
+// Simulates what conditions will be at each hour of the ski day
+// using a diurnal temperature model, then merges into blocks.
+// ════════════════════════════════════════════════════════════
+
+function classifyResortAtHour(nd, zone, h, curT) {
+    const {maxTempC_72h:rawMaxT72, minTempC_72h:rawMinT72,
+           maxTempToday:rawMaxToday, minTempToday:rawMinToday,
+           snow24h_cm:s24, rain24h_mm:r24, rain72h_mm:r72} = nd;
+    // Use today's forecast temps for daily condition checks — aligns with diurnal model
+    const rawMaxT=rawMaxToday??rawMaxT72, rawMinT=rawMinToday??rawMinT72;
+    const LAPSE_F=1.5, ELEV_BASE=1500;
+    const elevCorrC=(zone.elev??0)>ELEV_BASE ? -((zone.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+    const minT=rawMinT+elevCorrC;
+    const month=new Date().getMonth(), isCornSeason=month>=2&&month<=4;
+    // Peak solar multipliers per aspect (at peak hour)
+    const sM={N:.05,NE:.22,NW:.14,E:.65,W:.60,SE:.85,SW:.78,S:.95};
+    // Hour of peak direct sun for each aspect
+    const peakH={N:12,NE:9,E:9,SE:10.5,S:12,SW:13.5,W:15,NW:15}[zone.aspect]??12;
+    const spr=isCornSeason?1.5:(month===1?1.15:1.0);
+    const isW=month<=1||month>=10;
+    const cM=({conifer:.45,mixed:isW?.65:.50,deciduous:isW?.85:.45,open:1.0})[zone.canopy??'open'];
+    // Time-varying solar: cosine bell centred on peakH, 6h half-period, floor 0.15
+    const rawSolar=(sM[zone.aspect]??0.55)*spr*Math.max(0.15,Math.cos(Math.PI*(h-peakH)/6));
+    const solar=rawSolar*cM;
+    const rainThenFreeze=r72>3&&curT<-2;
+    // overnightHardFreeze: did it freeze hard enough to lock in morning ice?
+    // No max-temp requirement — morning ice depends only on the overnight low, not tomorrow's high.
+    // (A cold day with max +1°C at the valley floor can still have a rock-hard icy morning.)
+    const overnightHardFreeze_r = Math.min(rawMinT,(rawMinT72??rawMinT))<-4;
+    // icyMorning: hard overnight freeze + early-morning hours = icy trail surface
+    const icyMorning_r = overnightHardFreeze_r && h < 9;
+    // freezeThaw: FULL melt-refreeze cycle (needs daytime warmth too) — for solar crust & midday ice
+    const freezeThaw=rawMaxT>0&&overnightHardFreeze_r;
+    const solarSoft=rawSolar>0.55&&curT>-4;
+    const cornCycle=rawMaxT>=0&&rawMaxT<=8&&rawMinT>=-16&&rawMinT<=-2;
+    const cornAsp=['S','SE','SW','E','W'];
+    const cornElig=isCornSeason||(month===1&&cornAsp.includes(zone.aspect));
+    // Corn window extends to aspect's peak + 3h (W faces can corn in late afternoon)
+    const cornEnd=Math.min(17,peakH+3);
+    if(s24>10&&curT<-2&&r72<1)              return{q:'Powder Day',   c:'#1565C0',e:'❄️'};
+    if(r24>5&&!rainThenFreeze)               return{q:'Wet/Slushy',   c:'#C62828',e:'💦'};
+    // Icy/Hard Pack: morning refreeze (no warmth needed) OR solar-driven midday crust
+    if(rainThenFreeze||(s24<5&&(icyMorning_r||(freezeThaw&&solar>0.25))&&h<10))
+                                             return{q:'Icy/Hard Pack',c:'#78909C',e:'🧊'};
+    if(cornElig&&cornCycle&&rawSolar>0.25&&h<cornEnd)
+                                             return{q:'Spring Corn',  c:'#F9A825',e:'🌽'};
+    if(cornElig&&cornCycle&&h>=cornEnd&&curT<-1) return{q:'Icy/Hard Pack',c:'#78909C',e:'🧊'};
+    if(curT>1||solarSoft)                   return{q:'Wet/Slushy',   c:'#C62828',e:'💦'};
+    if(curT<-4&&minT<-8&&s24<10&&!cornCycle)return{q:'Prime Grooming',c:'#00897B',e:'⭐'};
+    // Persistent Icy/Hard Pack: if overnight froze hard and surface still cold,
+    // the icy pack stays all day — curT>1 and solarSoft are already caught by Wet/Slushy above.
+    // curT < -1 threshold keeps near-freezing groomed runs in "Good Conditions" range.
+    if(overnightHardFreeze_r&&s24<5&&curT<-1)return{q:'Icy/Hard Pack',c:'#78909C',e:'🧊'};
+    // Close the 0–1°C gap: Good Conditions up to the activeMelt threshold (curT<1)
+    if(curT<1)                              return{q:'Good Conditions',c:'#1976D2',e:'🎿'};
+                                            return{q:'Variable',     c:'#37474F',e:'❓'};
+}
+
+function classifyBCAtHour(nd, zone, h, curT) {
+    // Mirrors classify() logic as closely as possible — same thresholds, same priority order.
+    const {maxTempC_72h:rawMaxT72,minTempC_72h:rawMinT72,
+           maxTempToday:rawMaxToday,minTempToday:rawMinToday,
+           snow24h_cm:s24,snow72h_cm:s72,snow7d_cm:s7,
+           rain24h_mm:r24,rain72h_mm:r72,wind10m_kmh:wind=0,
+           snowDepthM:depthM=0,snowfall_season_cm:seasonSnow=0} = nd;
+    // Use today's forecast min/max for daily condition checks — keeps arc consistent
+    // with the diurnal temperature model in getDayTimeline (which also uses maxTempToday/minTempToday).
+    // 72h extremes are kept for multi-day history checks (warmRainyMeltout).
+    const rawMaxT=rawMaxToday??rawMaxT72, rawMinT=rawMinToday??rawMinT72;
+    const LAPSE_F=1.5,ELEV_BASE=1500;
+    const elevCorrC=(zone.elev??0)>ELEV_BASE ? -((zone.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+    const maxT=rawMaxT+elevCorrC, minT=rawMinT+elevCorrC;
+    const month=new Date().getMonth(), isCornSeason=month>=2&&month<=4;
+    // Peak solar multipliers per aspect (at peak hour)
+    const sM={N:.05,NE:.22,NW:.14,E:.65,W:.60,SE:.85,SW:.78,S:.95};
+    // Hour of peak direct sun for each aspect
+    const peakH={N:12,NE:9,E:9,SE:10.5,S:12,SW:13.5,W:15,NW:15}[zone.aspect]??12;
+    const spr=isCornSeason?1.5:(month===1?1.15:1.0);
+    const isW=month<=1||month>=10;
+    const cM=({conifer:.45,mixed:isW?.65:.50,deciduous:isW?.85:.45,open:1.0})[zone.canopy??'open'];
+    // Time-varying solar: cosine bell centred on peakH, 6h half-period, floor 0.15
+    const rawSolar=(sM[zone.aspect]??0.55)*spr*Math.max(0.15,Math.cos(Math.PI*(h-peakH)/6));
+    const solar=rawSolar*cM;
+    // warmRainyMeltout is a multi-day phenomenon — use 72h max for it
+    const warmRainyMeltout=(rawMaxT72+elevCorrC)>5&&r72>15;
+    const hasBase=depthM>0.15||s7>15||(seasonSnow>40&&!warmRainyMeltout);
+    const rainThenFreeze=r72>3&&curT<-2;
+    // overnightHardFreeze: did the overnight refreeze hard enough to lock in morning ice?
+    // No max-temp requirement here — a cold cloudy day (max +1°C at valley) can still have
+    // a rock-hard icy morning at elevation after a -8°C overnight. The maxT>1 gate only
+    // applies to the full daytime melt-refreeze (freezeThaw) used for solar crust.
+    const overnightHardFreeze = (Math.min(rawMinT,(rawMinT72??rawMinT))+elevCorrC)<-4;
+    // icyMorning fires on overnight hard freeze alone (h<9), no daytime max required
+    const icyMorning = overnightHardFreeze && h < 9;
+    // freezeThaw: FULL melt-refreeze cycle — needs both hard freeze AND warm-enough day
+    const freezeThaw=maxT>1&&overnightHardFreeze;
+    const cornCycle=maxT>=0&&maxT<=5&&minT>=-9&&minT<=-3;
+    const cornAsp=['S','SE','SW','E'];
+    const cornElig=isCornSeason||(month===1&&cornAsp.includes(zone.aspect));
+    // On a proper corn day, suppress solarSoft so Corn Snow fires instead of Wet/Heavy
+    // Extend suppression to h<17 so W-facing aspects get their afternoon corn window
+    const isCornDay=cornElig&&cornCycle&&solar>0.45&&hasBase&&s24<5;
+    const solarSoft=rawSolar>0.55&&curT>-4&&hasBase&&!(isCornDay&&h<17&&curT<=1);
+    const activeMelt=curT>1&&hasBase;
+    const rainOnSnow=r24>5&&hasBase;
+    // ① Crusty/Ice: morning refreeze (no warmth needed) OR solar-driven daytime crust.
+    // At h<9, overnight hard freeze creates icy surface independent of daytime high —
+    // N/NW/NE faces have near-zero solar at 7-8am so the solar>0.25 gate must not apply.
+    const crustyTimeOk = h < 10 || (!solarSoft && curT < -1);
+    if((rainThenFreeze&&s24<3)||(s24<8&&(icyMorning||(freezeThaw&&solar>0.25&&crustyTimeOk))))
+                                                                return{q:'Crusty/Ice',   c:'#546E7A',e:'🧊'};
+    // ② Wet/Heavy — activeMelt, rain on snow, or solar softening
+    if(activeMelt||rainOnSnow||solarSoft)                       return{q:'Wet/Heavy',    c:'#C62828',e:'💦'};
+    if(wind>40&&s72>8)                                          return{q:'Wind Slab',    c:'#B71C1C',e:'⚠️'};
+    if(s24>10&&curT<-8&&r72<0.5)                                return{q:'Blower Powder',c:'#0D47A1',e:'❄️'};
+    if((s24>8||s72>20)&&curT<-3&&r72<1&&maxT<0)                return{q:'Powder',       c:'#1565C0',e:'❄️'};
+    if(cornElig&&cornCycle&&solar>0.45&&hasBase&&s24<5)         return{q:'Corn Snow',    c:'#F9A825',e:'🌽'};
+    if(freezeThaw&&solar>0.4&&hasBase)                          return{q:'Solar Crust',  c:'#E65100',e:'🌞'};
+    // ⑦ Persistent Crusty/Ice: if overnight froze hard and no new snow has covered the
+    // crust, the surface stays icy all day — regardless of hour. activeMelt and solarSoft
+    // would have returned Wet/Heavy above if they'd fired, so reaching here means neither
+    // happened. Without new snow (s24<5) there's nothing to transform the crust.
+    if(overnightHardFreeze&&s24<5)                              return{q:'Crusty/Ice',   c:'#546E7A',e:'🧊'};
+    // ⑧ Settled Powder — s7 > 4 OR seasonalBase; allow up to activeMelt threshold (curT<1)
+    // Using curT<1 instead of curT<0 closes the 32-34°F gap where shaded NW/N terrain
+    // stays settled-powder quality even though air temp ticks slightly above freezing.
+    const seasonalBase=seasonSnow>50&&!warmRainyMeltout;
+    if((s7>4||seasonalBase)&&curT<1&&r72<3)                     return{q:'Settled Powder',c:'#00897B',e:'🌨️'};
+                                                                return{q:'Variable/Thin',c:'#37474F',e:'❓'};
+}
+
+function getDayTimeline(nd, zone) {
+    const S=7, E=17;  // 7am–5pm ski day
+    const LAPSE_F=1.5,ELEV_BASE=1500;
+    const elevCorrC=(zone.elev??0)>ELEV_BASE ? -((zone.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+    const rawMin=nd.minTempToday??nd.minTempC_72h, rawMax=nd.maxTempToday??nd.maxTempC_72h;
+    const minT=rawMin+elevCorrC, maxT=rawMax+elevCorrC;
+    const avg=(maxT+minT)/2, amp=(maxT-minT)/2;
+    const tempAt=h=>avg+amp*Math.cos(2*Math.PI*(h-14)/24);
+    const blocks=[], classify=zone.type==='resort'?classifyResortAtHour:classifyBCAtHour;
+    let cur=null;
+    for(let h=S;h<=E;h++){
+        const cond=classify(nd,zone,h,tempAt(h));
+        if(cur&&cur.q===cond.q){ cur.endH=h+1; }
+        else{ if(cur)blocks.push(cur); cur={...cond,startH:h,endH:h+1}; }
+    }
+    if(cur)blocks.push(cur);
+    return{blocks,startH:S,endH:E+1};
+}
+
+function renderDayArc(nd, zone, showNow=true) {
+    const {blocks,startH,endH}=getDayTimeline(nd,zone);
+    const total=endH-startH;
+    const nowH = showNow ? new Date().getHours()+new Date().getMinutes()/60 : -1;
+    const fh=h=>`${h%12||12}${h>=12?'pm':'am'}`;
+
+    const bHtml=blocks.map(b=>{
+        const w=((b.endH-b.startH)/total*100).toFixed(1);
+        const narrow=(b.endH-b.startH)<2;
+        return `<div class="da-block" style="width:${w}%;background:${b.c}70"
+            title="${b.q} · ${fh(b.startH)}–${fh(b.endH)}">
+            <span class="da-emoji">${b.e}</span>
+            ${narrow?'':` <span class="da-label">${b.q}</span>`}
+        </div>`;
+    }).join('');
+
+    const nowPct=((nowH-startH)/total*100).toFixed(1);
+    const showNowLine=showNow&&nowH>=startH&&nowH<=endH;
+    const nowLine=showNowLine
+        ?`<div style="position:absolute;left:${nowPct}%;top:0;bottom:0;width:2px;background:rgba(255,255,255,.88);z-index:5;pointer-events:none"></div>`:'';
+
+    // Time ticks: start of each block + end of day, filtered to avoid crowding
+    const rawTicks=[...blocks.map(b=>b.startH),endH];
+    const ticks=rawTicks.filter((h,i,a)=>i===0||((h-a[i-1])/total*100)>=13);
+    const ticksHtml=ticks.map(h=>{
+        const pct=((h-startH)/total*100).toFixed(1);
+        return `<span class="da-tick" style="left:${pct}%">${fh(h)}</span>`;
+    }).join('');
+    const nowTick=showNowLine
+        ?`<span class="da-tick" style="left:${nowPct}%;color:rgba(255,255,255,.85);font-weight:700;font-size:.5rem;margin-top:-1px">▼</span>`:'';
+
+    const isTmr = nd.isForecast;
+    const arcLabel = isTmr ? '🌅 Tomorrow\'s Snow Arc' : '📅 Today\'s Snow Arc';
+
+    return `<div class="day-arc">
+        <div class="da-header">
+            <span>${arcLabel}</span>
+            <span class="da-aspect-label">${zone.aspect}-facing · ${zone.name.split(' ').slice(0,2).join(' ')}</span>
+        </div>
+        <div class="da-track">${bHtml}${nowLine}</div>
+        <div class="da-time-row">${ticksHtml}${nowTick}</div>
+    </div>`;
+}
+
+// ════════════════════════════════════════════════════════════
+// RENDER ZONE DETAIL
+// ════════════════════════════════════════════════════════════
+function renderDetail(id) {
+    // Delegate to tomorrow panel when tomorrow tab is active
+    if (activeTab === 'tomorrow') return renderTomorrowDetail(id);
+
+    const z=ZONES.find(z=>z.id===id), c=cache[id], el=document.getElementById('zoneDetail');
+    if(!z) return;
+
+    if(!c){
+        el.innerHTML=`<div class="zdh"><h2>${z.name}</h2><div class="loading-row"><div class="spinner"></div>Loading…</div></div>`;
+        return;
+    }
+
+    // Zone failed to load — show a friendly retry prompt
+    if(c.error || !c.nd){
+        el.innerHTML=`<div class="zdh">
+            <h2>${z.name}</h2>
+            <div class="qbadge a-warning" style="margin-top:.5rem">
+                <span class="emoji">⚠️</span>
+                <div><div class="qname">Data unavailable</div>
+                <div style="font-size:.75rem;font-weight:400;margin-top:.2rem">Error: <code style="font-size:.72rem;background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px">${c.error||'unknown'}</code></div></div>
+            </div>
+            <button class="btn" style="margin-top:.75rem;width:100%" onclick="loadAllZones(true)">↻ Try Again</button>
+        </div>`;
+        return;
+    }
+
+    const nd=c.nd, q=c.quality, aqs=c.aspectQualities;
+    const fahr=c=>(c*9/5+32).toFixed(0), inch=cm=>(cm/2.54).toFixed(1);
+    const depIn=(nd.snowDepthM*39.37).toFixed(0);
+    const stars=Math.round(q.rating/2);
+    const starStr='★'.repeat(Math.min(stars,5))+'☆'.repeat(Math.max(0,5-stars));
+
+    // Source tag
+    const srcHtml = `<div class="source-tag"><span class="sdot" style="background:var(--dim)"></span>🌐 Open-Meteo · Full-season history (Oct 1) + 3-day forecast</div>`;
+
+    // Aspect breakdown grid (2 columns, ordered N→NW)
+    const aspGrid=ASPECTS.map(asp=>{
+        const aq=aqs[asp], isPrim=asp===z.aspect;
+        return `<div class="asp-cell ${isPrim?'primary':''}" id="asp-cell-${z.id}-${asp}" style="border-left-color:${aq.color}" onclick="selectAspect('${z.id}','${asp}')">
+            <span class="asp-dir">${asp}</span>
+            <span class="asp-emoji">${aq.emoji}</span>
+            <span class="asp-qname">${aq.quality}</span>
+        </div>`;
+    }).join('');
+
+    // Canopy display helpers
+    const canopyLabel  = {conifer:'Conifer (Spruce-Fir)', mixed:'Mixed Forest', deciduous:'Deciduous', open:'Open / Above Treeline'}[z.canopy ?? 'open'];
+    const canopyEmoji  = {conifer:'🌲', mixed:'🌲🍂', deciduous:'🍂', open:'🏔️'}[z.canopy ?? 'open'];
+    const month_now    = new Date().getMonth();
+    const isWinterNow  = month_now <= 1 || month_now >= 10;
+    const shadeBlocks  = {
+        conifer:   55,
+        mixed:     isWinterNow ? 35 : 50,
+        deciduous: isWinterNow ? 15 : 55,
+        open:      0
+    }[z.canopy ?? 'open'];
+    const canopyNote = z.canopy === 'conifer'
+        ? 'Dense evergreen canopy blocks ~55% solar — powder preservation excellent year-round.'
+        : z.canopy === 'mixed'
+            ? (isWinterNow
+                ? 'Hardwoods currently bare. Reduced winter canopy — moderate solar exposure.'
+                : 'Full mixed canopy in leaf — moderate solar shading.')
+            : z.canopy === 'deciduous'
+                ? (isWinterNow
+                    ? 'Deciduous trees currently bare — minimal canopy protection this time of year.'
+                    : 'Full leaf canopy in summer/fall — good solar shading.')
+                : 'No tree canopy — fully exposed to sun, wind, and temperature extremes.';
+
+    el.innerHTML=`
+        <div class="zdh">
+            <h2>${z.name}</h2>
+            <div class="zone-meta">
+                <span>🏔️ ${z.elev.toLocaleString()} ft</span>
+                <span>🧭 ${z.aspect}-facing</span>
+                <span>${canopyEmoji} ${shadeBlocks>0?`${shadeBlocks}% shade`:'Open'}</span>
+                <span style="padding:1px 7px;border-radius:10px;font-weight:600;letter-spacing:.03em;
+                    ${z.type==='resort'
+                        ? 'background:rgba(25,118,210,.18);color:#64B5F6;border:1px solid rgba(100,181,246,.3)'
+                        : 'background:rgba(0,121,107,.15);color:#80CBC4;border:1px solid rgba(128,203,196,.25)'}">
+                    ${z.type==='resort' ? '🏔 Resort' : '🌲 Backcountry'}</span>
+            </div>
+            <div class="qbadge a-${q.alert}">
+                <span class="emoji">${q.emoji}</span>
+                <div><div class="qname">${q.quality} <span style="font-weight:400;font-size:.78rem">(${z.aspect})</span></div>
+                <div class="stars">${starStr}</div></div>
+            </div>
+            <p class="qreason">${q.reason}</p>
+        </div>
+        <div id="dayArcBox">${renderDayArc(nd, z)}</div>
+        ${srcHtml}
+        <div class="rose-wrap">
+            <div class="rose-title">All-Aspect Breakdown — click a wedge or row to see its day arc</div>
+            <div class="rose-row">
+                <div class="rose-svg-wrap">${buildRoseSVG(aqs, z.aspect, 170, z.id)}</div>
+                <div class="rose-legend">
+                    <div class="asp-grid">${aspGrid}</div>
+                </div>
+            </div>
+        </div>
+        <div class="aspect-detail" id="aspectDetail"></div>
+        ${z.type === 'resort' && TRAILS[z.id] ? renderTrailPicks(z.id) : ''}
+        <div class="metrics">
+            ${(()=>{
+                const LAPSE_F=1.5, ELEV_BASE=1500;
+                const corrC = z.elev > ELEV_BASE ? -((z.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+                const corrF = fahr(nd.currentTempC + corrC);
+                const label = corrC < -0.5 ? 'Temp Est.' : 'Temp Now';
+                const tip   = corrC < -0.5 ? `Elevation-adjusted from ${fahr(nd.currentTempC)}°F model value (-${Math.abs((corrC*9/5).toFixed(1))}°F for ${z.elev.toLocaleString()}ft)` : '';
+                return `<div class="metric" title="${tip}"><div class="mval">${corrF}°</div><div class="mlbl">${label}</div></div>`;
+            })()}
+            <div class="metric"><div class="mval">${inch(nd.snow24h_cm)}"</div><div class="mlbl">Snow 24h</div></div>
+            <div class="metric"><div class="mval">${inch(nd.snow72h_cm)}"</div><div class="mlbl">Snow 72h</div></div>
+            <div class="metric"><div class="mval">${depIn>0?depIn+'"':'—'}</div><div class="mlbl">Depth Est.</div></div>
+            <div class="metric" title="Cumulative snowfall Oct 1 → today"><div class="mval" style="color:#64B5F6">${inch(nd.snowfall_season_cm??0)}"</div><div class="mlbl">Season Total</div></div>
+        </div>
+        <div class="chart-wrap">
+            <div class="chart-title">7-day temp &amp; snowfall${nd.source==='OpenMeteo'?' + 3-day forecast':''}</div>
+            <div class="chart-box"><canvas id="wxChart"></canvas></div>
+        </div>
+        <div class="zdesc">${z.desc}</div>`;
+
+    drawChart(nd.chartDays);
+}
+
+// ════════════════════════════════════════════════════════════
+// CHART
+// ════════════════════════════════════════════════════════════
+async function drawChart(days) {
+    const canvas=document.getElementById('wxChart');
+    if(!canvas||!days?.length) return;
+    try { await ensureChartJs(); } catch { return; }
+    if(weatherChart){weatherChart.destroy();weatherChart=null;}
+
+    weatherChart=new Chart(canvas,{
+        data:{
+            labels:days.map(d=>d.label),
+            datasets:[
+                {type:'line',label:'Avg °F',data:days.map(d=>d.avgTempF!=null?+d.avgTempF.toFixed(1):null),
+                 borderColor:'#4fc3f7',backgroundColor:'transparent',tension:.4,pointRadius:2.5,
+                 pointBackgroundColor:'#4fc3f7',yAxisID:'yT',order:1,spanGaps:true},
+                {type:'bar',label:'Snow (in)',data:days.map(d=>+d.snowIn.toFixed(2)),
+                 backgroundColor:days.map(d=>d.isForecast?'rgba(100,155,210,.4)':(d.snowIn>0?'rgba(25,100,210,.75)':'rgba(50,70,90,.3)')),
+                 borderRadius:2,yAxisID:'yS',order:2}
+            ]
+        },
+        options:{
+            responsive:true,maintainAspectRatio:false,
+            interaction:{mode:'index',intersect:false},
+            plugins:{
+                legend:{labels:{color:'#7a9bb5',font:{size:10},boxWidth:10,padding:10}},
+                tooltip:{backgroundColor:'rgba(13,27,42,.95)',borderColor:'#2d4159',borderWidth:1,titleColor:'#e0eff7',bodyColor:'#7a9bb5'}
+            },
+            scales:{
+                x:{ticks:{color:'#6b93b0',font:{size:9},maxRotation:40},grid:{color:'rgba(45,65,89,.4)'}},
+                yT:{position:'left',ticks:{color:'#4fc3f7',font:{size:9}},grid:{color:'rgba(45,65,89,.4)'}},
+                yS:{position:'right',ticks:{color:'#5090D0',font:{size:9}},grid:{display:false},min:0}
+            }
+        }
+    });
+}
+
+// ════════════════════════════════════════════════════════════
+// TOMORROW TAB — helpers, detail panel, picks banner
+// ════════════════════════════════════════════════════════════
+
+// Quality rating for "best arc block" selection
+const Q_RATING = {
+    'Blower Powder':10,'Powder':9,'Spring Corn':8,'Corn Snow':8,
+    'Settled Powder':7,'Prime Grooming':6,'Good Conditions':5,
+    'Wind Slab':4,'Solar Crust':3,'Wet/Heavy':3,'Wet/Slushy':3,
+    'Crusty/Ice':2,'Icy/Hard Pack':2,'Variable/Thin':1,'Variable':1
+};
+
+// Return the highest-rated block from a day arc
+function getBestFromArc(blocks) {
+    if (!blocks.length) return null;
+    return blocks.reduce((b, x) => (Q_RATING[x.q] ?? 0) > (Q_RATING[b.q] ?? 0) ? x : b, blocks[0]);
+}
+
+// ════════════════════════════════════════════════════════════
+// OVERNIGHT REFREEZE MODEL
+// Models the sunset→sunrise temperature curve and computes cumulative
+// cold exposure (degree-hours below 0°C) as a proxy for ice formation.
+// ════════════════════════════════════════════════════════════
+function getOvernightRefreeze(nd, zone) {
+    const LAPSE_F=1.5, ELEV_BASE=1500;
+    const elevCorrC=(zone.elev??0)>ELEV_BASE ? -((zone.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+
+    // Approximate sunset/sunrise by month at VT latitude (~43.5°N) — used for display label
+    const month = new Date().getMonth();
+    const sunsetH  = [16.3,16.7,17.5,19.5,20.2,20.5,20.3,19.5,18.5,17.5,16.7,16.2][month];
+    const sunriseH = [ 7.2, 6.7, 6.0, 5.4, 4.9, 4.8, 5.0, 5.5, 6.1, 6.7, 7.1, 7.3][month];
+    const overnightHrs = (24 - sunsetH) + sunriseH; // e.g. Feb ≈ 13.2h
+
+    let degreeColdHrs = 0;
+    let overnightMinC;
+
+    if (nd.tonightTemps && nd.tonightTemps.length >= 8) {
+        // ── Hourly path: actual forecast temps for tonight's 5pm→7am window ──────────
+        // Each value = 1 hour; elevation-corrected. This is far more accurate than
+        // the cosine approximation, which could use tomorrow night's daily minimum.
+        const temps = nd.tonightTemps.map(t => t + elevCorrC);
+        overnightMinC = Math.min(...temps);
+        for (const temp of temps) {
+            if (temp < 0) degreeColdHrs += -temp; // 1 hr × |temp °C below zero|
+        }
+    } else {
+        // ── Fallback: cosine approximation (used when hourlyBatch unavailable) ───────
+        // Uses today's evening temp decaying to tomorrow's daily min over the overnight window.
+        // Note: minTempTomorrow is a daily minimum and can occur late tomorrow night rather
+        // than pre-dawn — the hourly path above avoids this ambiguity when data is available.
+        const eveningT    = (nd.currentTempC ?? 0) + elevCorrC;
+        overnightMinC     = (nd.minTempTomorrow ?? nd.minTempToday ?? nd.currentTempC ?? 0) + elevCorrC;
+        const STEPS = Math.round(overnightHrs * 6); // 10-min resolution
+        for (let i = 0; i <= STEPS; i++) {
+            const t    = (i / STEPS) * overnightHrs;
+            const x    = Math.cos(Math.PI * t / overnightHrs);
+            const temp = overnightMinC + (eveningT - overnightMinC) * x * x;
+            if (temp < 0) degreeColdHrs += (-temp) * (overnightHrs / STEPS);
+        }
+    }
+
+    // Classify refreeze intensity.
+    // Thresholds calibrated for actual hourly step data (1 hr each):
+    //   min~0°C  → ~0–5 deg·C·hrs  (trace)
+    //   min~-3°C → ~5–20           (light)
+    //   min~-7°C → ~20–50          (moderate)
+    //   min<-10°C→ ~60+            (hard)
+    let level, label, color, icon;
+    if (overnightMinC >= 0) {
+        level='none';     icon='💧'; color='#C62828';
+        label=`Surface stays above freezing all night (low ${fahr_n(overnightMinC)}°F) — no refreeze`;
+    } else if (degreeColdHrs < 5) {
+        level='trace';    icon='🌡️'; color='#78909C';
+        label=`Brief dip below freezing (${fahr_n(overnightMinC)}°F low, ${degreeColdHrs.toFixed(0)}°C·hrs) — light surface hardening only`;
+    } else if (degreeColdHrs < 25) {
+        level='light';    icon='❄️'; color='#4FC3F7';
+        label=`Light overnight freeze (${fahr_n(overnightMinC)}°F low, ${degreeColdHrs.toFixed(0)}°C·hrs) — firm crust by morning, softens quickly in sun`;
+    } else if (degreeColdHrs < 60) {
+        level='moderate'; icon='🧊'; color='#1976D2';
+        label=`Solid overnight refreeze (${fahr_n(overnightMinC)}°F low, ${degreeColdHrs.toFixed(0)}°C·hrs) — icy surface at 7am, prime corn window later`;
+    } else {
+        level='hard';     icon='🥶'; color='#0D47A1';
+        label=`Hard overnight freeze (${fahr_n(overnightMinC)}°F low, ${degreeColdHrs.toFixed(0)}°C·hrs) — boilerplate until well into morning`;
+    }
+
+    return { level, icon, color, label, overnightMinC, degreeColdHrs, overnightHrs };
+}
+
+// Small helper: ˚C → ˚F formatted (used only inside the overnight module)
+function fahr_n(c) { return (c * 9/5 + 32).toFixed(0); }
+
+// Build a synthetic nd for tomorrow's forecast classification
+function buildTomorrowNd(nd) {
+    const tmaxRaw = nd.maxTempTomorrow ?? nd.maxTempToday;
+    // nd.minTempTomorrow is the DAILY minimum for tomorrow, which can occur late in the
+    // evening (e.g., cold front arrives at 10pm) rather than pre-dawn. This causes
+    // tomorrow's diurnal arc to show falsely frigid morning temps and spurious Crusty/Ice.
+    // When tonightTemps is available (hourly API), use the actual overnight minimum
+    // (min of 5pm today → 7am tomorrow) which is the true pre-dawn low for tomorrow morning.
+    const tminRaw = nd.tonightTemps?.length >= 8
+        ? Math.min(...nd.tonightTemps)
+        : (nd.minTempTomorrow ?? nd.minTempToday);
+    const s24t    = nd.snowTomorrow_cm  ?? 0;
+    const r24t    = nd.rainTomorrow_mm  ?? 0;
+    const windT   = nd.windTomorrow_kmh ?? nd.maxWind24h_kmh;
+    return {
+        ...nd,
+        // Rough midday temp for instantaneous classify calls
+        currentTempC:    (tmaxRaw + tminRaw) / 2,
+        // 72h window: keep the broader range (today's 72h already includes yesterday)
+        maxTempC_72h:    Math.max(nd.maxTempC_72h ?? tmaxRaw, tmaxRaw),
+        minTempC_72h:    Math.min(nd.minTempC_72h ?? tminRaw, tminRaw),
+        // Tomorrow becomes "today" for the diurnal arc curve
+        maxTempToday:    tmaxRaw,
+        minTempToday:    tminRaw,
+        // Day-after-tomorrow becomes the new "tomorrow" for any look-ahead predictions
+        maxTempTomorrow: nd.maxTempDay2 ?? null,
+        minTempTomorrow: nd.minTempDay2 ?? null,
+        // Fresh snow forecast for tomorrow
+        snow24h_cm:      s24t,
+        // Rolling 72h window: keep today's 72h history + tomorrow's expected snow.
+        // Using nd.snow24h_cm (2-day window) was too narrow — it dropped multi-day storm history.
+        snow72h_cm:      (nd.snow72h_cm ?? 0) + s24t,
+        snow7d_cm:       (nd.snow7d_cm  ?? 0) + s24t,
+        rain24h_mm:      r24t,
+        rain72h_mm:      (nd.rain72h_mm ?? 0) + r24t,
+        maxWind24h_kmh:  windT,
+        isForecast:      true
+    };
+}
+
+// Tab switcher
+function switchTab(tab) {
+    activeTab = tab;
+    document.getElementById('tab-today').classList.toggle('active', tab === 'today');
+    document.getElementById('tab-tomorrow').classList.toggle('active', tab === 'tomorrow');
+    renderList();
+    if (activeId) renderDetail(activeId);
+}
+
+// "Prime Picks" banner — scan all zones for tomorrow's best conditions
+function renderTomorrowPicksBanner() {
+    const cornZones=[], powderZones=[], groomZones=[];
+    ZONES.forEach(z => {
+        const c = cache[z.id];
+        if (!c?.nd?.maxTempTomorrow) return;
+        const tnd = buildTomorrowNd(c.nd);
+        const {blocks} = getDayTimeline(tnd, z);
+        const best = getBestFromArc(blocks);
+        if (!best) return;
+        if (best.q==='Corn Snow'||best.q==='Spring Corn')          cornZones.push(z.name);
+        else if (best.q==='Blower Powder'||best.q==='Powder')      powderZones.push(z.name);
+        else if (best.q==='Prime Grooming')                         groomZones.push(z.name);
+    });
+    const rows=[];
+    if (cornZones.length)   rows.push(`<div class="pick-row"><span class="pick-icon">🌽</span><div><div class="pick-zones">${cornZones.join(', ')}</div><div class="pick-label">Prime corn expected</div></div></div>`);
+    if (powderZones.length) rows.push(`<div class="pick-row"><span class="pick-icon">❄️</span><div><div class="pick-zones">${powderZones.join(', ')}</div><div class="pick-label">Fresh powder forecast</div></div></div>`);
+    if (groomZones.length)  rows.push(`<div class="pick-row"><span class="pick-icon">⭐</span><div><div class="pick-zones">${groomZones.join(', ')}</div><div class="pick-label">Prime grooming expected</div></div></div>`);
+    const content = rows.length
+        ? rows.join('')
+        : `<div class="no-picks">No outstanding conditions predicted for tomorrow</div>`;
+    return `<div class="picks-banner"><div class="picks-title">Tomorrow's Prime Picks</div>${content}</div>`;
+}
+
+// Detail panel for the Tomorrow tab
+function renderTomorrowDetail(id) {
+    const el = document.getElementById('zoneDetail');
+    const z  = ZONES.find(z => z.id === id);
+    const c  = cache[id];
+    if (!z) return;
+
+    if (!c) {
+        el.innerHTML=`<div class="zone-placeholder"><div class="icon">⏳</div><p>Loading…</p></div>`;
+        return;
+    }
+    if (c.error || !c.nd) {
+        el.innerHTML=`<div class="zdh"><h2>${z.name}</h2>
+            <div class="qbadge a-warning"><span class="emoji">⚠️</span>
+            <div><div class="qname">Data unavailable</div></div></div></div>`;
+        return;
+    }
+    if (c.nd.maxTempTomorrow == null) {
+        el.innerHTML=`<div class="zdh"><h2>${z.name} <span class="tmr-tag">🌅 Tomorrow</span></h2>
+            <div class="qbadge a-unknown" style="margin-top:.5rem"><span class="emoji">❓</span>
+            <div><div class="qname">No forecast data</div>
+            <p class="qreason" style="margin-top:4px">Tomorrow's forecast unavailable. Try refreshing.</p>
+            </div></div></div>`;
+        return;
+    }
+
+    const nd   = c.nd;
+    const tnd  = buildTomorrowNd(nd);
+    const tAqs = classifyAllAspects(tnd, z);
+    const {blocks} = getDayTimeline(tnd, z);
+    const best = getBestFromArc(blocks);
+    const overnight = getOvernightRefreeze(nd, z);
+
+    const fahr = c => (c*9/5+32).toFixed(0);
+    const inch = cm => (cm/2.54).toFixed(1);
+    const LAPSE_F=1.5, ELEV_BASE=1500;
+    const corrC = z.elev > ELEV_BASE ? -((z.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+    const hiF  = fahr((tnd.maxTempToday ?? 0) + corrC);
+    const loF  = fahr((tnd.minTempToday ?? 0) + corrC);
+    const snowI = inch(tnd.snow24h_cm ?? 0);
+    const windMph = ((tnd.maxWind24h_kmh ?? 0) * 0.621).toFixed(0);
+
+    const alertFor = q => ({
+        'Blower Powder':'excellent','Powder':'excellent',
+        'Spring Corn':'good','Corn Snow':'good',
+        'Settled Powder':'fair','Prime Grooming':'fair',
+        'Wind Slab':'warning','Wet/Heavy':'warning','Wet/Slushy':'warning',
+        'Crusty/Ice':'danger','Icy/Hard Pack':'danger'
+    }[q] ?? 'fair');
+
+    const fh = h => `${h%12||12}${h>=12?'pm':'am'}`;
+    const bestTime = best ? `${fh(best.startH)}–${fh(best.endH)}` : '—';
+
+    const aspGrid = ASPECTS.map(asp => {
+        const aq=tAqs[asp], isPrim=asp===z.aspect;
+        return `<div class="asp-cell ${isPrim?'primary':''}" id="asp-cell-${z.id}-${asp}" style="border-left-color:${aq.color}" onclick="selectAspect('${z.id}','${asp}')">
+            <span class="asp-dir">${asp}</span>
+            <span class="asp-emoji">${aq.emoji}</span>
+            <span class="asp-qname">${aq.quality}</span>
+        </div>`;
+    }).join('');
+
+    const tmrDate = new Date(Date.now()+86400000).toLocaleDateString('en-US',
+        {weekday:'long',month:'short',day:'numeric'});
+
+    el.innerHTML=`
+        <div class="zdh">
+            <h2>${z.name} <span class="tmr-tag">🌅 Tomorrow</span></h2>
+            <div class="zone-meta">
+                <span>🏔️ ${z.elev.toLocaleString()} ft</span>
+                <span>🧭 ${z.aspect}-facing</span>
+                <span style="color:#FFB74D">📈 ${hiF}° / 📉 ${loF}°</span>
+                <span style="padding:1px 7px;border-radius:10px;font-weight:600;letter-spacing:.03em;
+                    ${z.type==='resort'
+                        ? 'background:rgba(25,118,210,.18);color:#64B5F6;border:1px solid rgba(100,181,246,.3)'
+                        : 'background:rgba(0,121,107,.15);color:#80CBC4;border:1px solid rgba(128,203,196,.25)'}">
+                    ${z.type==='resort' ? '🏔 Resort' : '🌲 Backcountry'}</span>
+            </div>
+            ${best ? `<div class="qbadge a-${alertFor(best.q)}">
+                <span class="emoji">${best.e}</span>
+                <div>
+                    <div class="qname">${best.q} <span style="font-weight:400;font-size:.78rem">(${z.aspect} · best ${bestTime})</span></div>
+                    <div style="font-size:.67rem;color:var(--dim);margin-top:2px">Best expected condition for tomorrow · ${z.aspect}-facing primary aspect</div>
+                </div>
+            </div>` : ''}
+        </div>
+        <div id="dayArcBox">${renderDayArc(tnd, z, false)}</div>
+        ${(() => {
+            // Overnight refreeze bar: scale 0–100 degree-C·hours as 100%
+            const maxCold = 100;
+            const pct = Math.min(100, (overnight.degreeColdHrs / maxCold) * 100).toFixed(0);
+            return `<div class="overnight-wrap">
+                <div class="overnight-header">🌙 Tonight's Overnight Refreeze</div>
+                <div class="overnight-card">
+                    <span class="overnight-icon">${overnight.icon}</span>
+                    <div class="overnight-bar-wrap">
+                        <div class="overnight-bar-track">
+                            <div class="overnight-bar-fill" style="width:${pct}%;background:${overnight.color}"></div>
+                        </div>
+                        <div class="overnight-label">${overnight.label} · ${overnight.overnightHrs.toFixed(1)}h overnight window</div>
+                    </div>
+                </div>
+            </div>`;
+        })()}
+        <div class="source-tag">
+            <span class="sdot" style="background:#FFB74D"></span>
+            🌅 ${tmrDate} forecast — Open-Meteo 3-day model
+        </div>
+        <div class="rose-wrap">
+            <div class="rose-title">Tomorrow's Aspect Breakdown</div>
+            <div class="rose-row">
+                <div class="rose-svg-wrap">${buildRoseSVG(tAqs, z.aspect, 170, z.id)}</div>
+                <div class="rose-legend"><div class="asp-grid">${aspGrid}</div></div>
+            </div>
+        </div>
+        ${z.type === 'resort' && TRAILS[z.id] ? renderTrailPicks(z.id) : ''}
+        <div class="tmr-metrics metrics">
+            <div class="metric"><div class="mval">${loF}°</div><div class="mlbl">Forecast Low</div></div>
+            <div class="metric"><div class="mval">${hiF}°</div><div class="mlbl">Forecast High</div></div>
+            <div class="metric"><div class="mval">${snowI}"</div><div class="mlbl">Expected Snow</div></div>
+            <div class="metric"><div class="mval">${windMph}</div><div class="mlbl">Wind mph</div></div>
+        </div>
+        <div class="zdesc">${z.desc}</div>`;
+}
+
+// ════════════════════════════════════════════════════════════
+// TRAIL PICKS
+// ════════════════════════════════════════════════════════════
+function setTrailHour(zoneId, h) {
+    activeTrailHour = h;
+    renderDetail(zoneId);
+    // Scroll trail picks into view smoothly
+    requestAnimationFrame(() => {
+        const tp = document.querySelector('.trail-picks');
+        if (tp) tp.scrollIntoView({behavior:'smooth', block:'nearest'});
+    });
+}
+
+function renderTrailPicks(zoneId) {
+    const trails = TRAILS[zoneId];
+    const c = cache[zoneId];
+    if (!trails || !c?.nd) return '';
+
+    const z    = ZONES.find(z => z.id === zoneId);
+    const nd   = activeTab === 'tomorrow' ? buildTomorrowNd(c.nd) : c.nd;
+    const h    = activeTrailHour;
+    const isNow = h === 'now';
+    const hourF = isNow
+        ? new Date().getHours() + new Date().getMinutes()/60
+        : parseFloat(h);
+
+    // Temperature at this hour (cosine diurnal curve)
+    const LAPSE_F=1.5, ELEV_BASE=1500;
+    const corrC = z.elev > ELEV_BASE ? -((z.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+    const rawMin=nd.minTempToday??nd.minTempC_72h, rawMax=nd.maxTempToday??nd.maxTempC_72h;
+    const minT=rawMin+corrC, maxT=rawMax+corrC;
+    const avg=(maxT+minT)/2, amp=(maxT-minT)/2;
+    const curT = avg + amp*Math.cos(2*Math.PI*(hourF-14)/24);
+
+    // Classify every trail at this hour
+    const scored = trails.map(t => {
+        const vz = {...z, aspect: t.aspect};
+        const r  = classifyResortAtHour(nd, vz, Math.round(hourF), curT);
+        return {...t, q:r.q, c:r.c, rating: Q_RATING[r.q] ?? 3};
+    }).sort((a,b) => b.rating - a.rating);
+
+    const prime = scored.filter(t => t.rating >= 7);
+    const good  = scored.filter(t => t.rating >= 4 && t.rating < 7);
+    const meh   = scored.filter(t => t.rating < 4);
+
+    const nowLabel = isNow
+        ? `Now · ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`
+        : `${hourF % 12 || 12}${hourF >= 12 ? 'pm' : 'am'}`;
+
+    const row = t => `<div class="trail-row">
+        <span class="trail-diff">${t.diff}</span>
+        <span class="trail-name">${t.name}</span>
+        <span class="trail-asp">${t.aspect}</span>
+        <span class="trail-q" style="color:${t.c}">${t.q}</span>
+    </div>`;
+
+    const group = (cls, label, list) => list.length
+        ? `<div class="trail-group"><div class="tg-hd ${cls}">${label}</div>${list.map(row).join('')}</div>`
+        : '';
+
+    const timeBtns = [['now','Now'],['8','8am'],['10','10am'],['12','12pm'],['14','2pm'],['16','4pm']]
+        .map(([v,l]) => `<button class="tpick-btn${h===v?' active':''}" onclick="setTrailHour('${zoneId}','${v}')">${l}</button>`)
+        .join('');
+
+    return `<div class="trail-picks">
+        <div class="trail-picks-hd">🎿 Trail Picks · ${nowLabel}</div>
+        <div class="trail-time-btns">${timeBtns}</div>
+        ${group('prime','⭐ Prime conditions', prime)}
+        ${group('good', '🎿 Good',             good)}
+        ${group('meh',  '⚠️ Suboptimal',        meh)}
+        ${!prime.length && !good.length ? '<div class="no-picks" style="padding:6px 0">No prime conditions on any aspect right now</div>' : ''}
+    </div>`;
+}
+
+// ════════════════════════════════════════════════════════════
+// ZONE LIST
+// ════════════════════════════════════════════════════════════
+function renderList() {
+    const isTmr = activeTab === 'tomorrow';
+    const topHtml = isTmr ? renderTomorrowPicksBanner() : '';
+
+    const itemsHtml = ZONES.map(z => {
+        const c=cache[z.id], nd=c?.nd;
+        const canopyIco = {conifer:'🌲', mixed:'🌲🍂', deciduous:'🍂', open:'🏔️'}[z.canopy ?? 'open'];
+        let q, tStr, miniRose;
+
+        if (isTmr && nd?.maxTempTomorrow != null) {
+            // Tomorrow view: show tomorrow's best arc condition + Lo/Hi temps
+            const tnd  = buildTomorrowNd(nd);
+            const tAqs = classifyAllAspects(tnd, z);
+            const {blocks} = getDayTimeline(tnd, z);
+            const best = getBestFromArc(blocks);
+            q = best ? {quality:best.q, color:best.c, emoji:best.e} : c?.quality;
+            miniRose = buildMiniRoseSVG(tAqs);
+            const LAPSE_F=1.5,ELEV_BASE=1500;
+            const corrC = z.elev>ELEV_BASE ? -((z.elev-ELEV_BASE)/1000)*(LAPSE_F/1.8) : 0;
+            const fahr = c => (c*9/5+32).toFixed(0);
+            tStr = `${fahr((nd.minTempTomorrow??0)+corrC)}°/${fahr((nd.maxTempTomorrow??0)+corrC)}°`;
+        } else {
+            // Today view (or tomorrow data not yet loaded)
+            q = c?.quality;
+            miniRose = c?.aspectQualities
+                ? buildMiniRoseSVG(c.aspectQualities)
+                : `<div style="width:28px;height:28px;border-radius:50%;background:#546E7A;opacity:.4"></div>`;
+            tStr = nd ? `${(nd.currentTempC*9/5+32).toFixed(0)}°F` : '—';
+        }
+
+        const qName = q?.quality || '<span style="color:var(--dim)">Loading…</span>';
+        return `<div class="zitem ${activeId===z.id?'active':''}" id="li-${z.id}" onclick="selectZone('${z.id}')">
+            <div class="mini-rose">${miniRose}</div>
+            <div class="zi-info">
+                <div class="zi-name">${z.name}</div>
+                <div class="zi-sub">${qName} · ${z.elev.toLocaleString()}ft ${canopyIco}</div>
+            </div>
+            <div class="zi-temp" style="${isTmr?'font-size:.72rem;color:#FFB74D':''}">` +
+            `${tStr}</div>
+        </div>`;
+    }).join('');
+
+    document.getElementById('zoneListItems').innerHTML = topHtml + itemsHtml;
+}
+
+// ════════════════════════════════════════════════════════════
+// LOAD ALL ZONES
+// ════════════════════════════════════════════════════════════
+async function loadAllZones(forceRefresh=false) {
+    const CACHE_SUFFIX = '_om15';
+    const setStatus = msg => { document.getElementById('lastUpdated').textContent = msg; };
+
+    if (forceRefresh) {
+        ZONES.forEach(z => localStorage.removeItem('wx_' + z.id + CACHE_SUFFIX));
+    }
+
+    // ── Phase 1: Serve cached data immediately ────────────────
+    let needsFetch = false;
+    ZONES.forEach(z => {
+        const nd = wxCacheGet(z.id + CACHE_SUFFIX);
+        if (nd) {
+            cache[z.id] = {nd, quality: classify(nd, z), aspectQualities: classifyAllAspects(nd, z)};
+            updateWedges(z.id); refreshMarker(z.id);
+        } else {
+            needsFetch = true;
+        }
+    });
+    if (Object.keys(cache).length) { renderList(); if (activeId && cache[activeId]) renderDetail(activeId); }
+    if (!needsFetch) {
+        const t = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+        setStatus(`Updated ${t}`);
+        return;
+    }
+
+    // ── Phase 2: Fetch ALL data sources in parallel ───────────
+    // Compute date ranges first so all three fetches fire simultaneously —
+    // no sequential round trips on mobile.
+    setStatus('Loading…');
+    try {
+        const now = new Date();
+        const seasonStart = new Date(now.getMonth() < 7 ? now.getFullYear()-1 : now.getFullYear(), 9, 15);
+        const windowStart = new Date(now); windowStart.setDate(windowStart.getDate() - FORECAST_DAYS);
+
+        const fetches = [
+            fetchAllZonesBatch(),
+            fetchHourlyBatch().catch(() => null),
+        ];
+        if (seasonStart < windowStart) {
+            const s = seasonStart.toISOString().slice(0,10);
+            const e = new Date(windowStart - 86400000).toISOString().slice(0,10);
+            fetches.push(fetchArchiveBatch(s, e).catch(() => null));
+        }
+        const [rawBatch, hourlyBatch, archiveBatch = null] = await Promise.all(fetches);
+
+        rawBatch.forEach((raw, i) => {
+            const z = ZONES[i]; if (!z) return;
+            raw._archiveSnowCm = archiveBatch?.[i]?.daily?.snowfall_sum
+                ? archiveBatch[i].daily.snowfall_sum.reduce((a,v)=>a+(v??0),0)
+                : 0;
+            try {
+                const nd = normalizeOpenMeteo(raw, hourlyBatch?.[i] ?? null);
+                wxCacheSet(z.id + CACHE_SUFFIX, nd);
+                cache[z.id] = {nd, quality: classify(nd, z), aspectQualities: classifyAllAspects(nd, z)};
+                updateWedges(z.id); refreshMarker(z.id);
+            } catch(err) {
+                console.warn(`[${z.name}]`, err.message);
+                if (!cache[z.id]) cache[z.id] = {nd:null, quality:null, aspectQualities:null, error:err.message};
+            }
+        });
+
+        renderList();
+        if (activeId) renderDetail(activeId);
+    } catch(err) {
+        console.warn('Batch fetch failed, falling back to per-zone:', err.message);
+        await loadZonesFallback(CACHE_SUFFIX, setStatus);
+        return;
+    }
+
+    const t = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+    setStatus(`Updated ${t}`);
+}
+
+// Fallback: individual per-zone fetches used when batch API fails
+async function loadZonesFallback(cacheSuffix, setStatus) {
+    let done = 0;
+    await Promise.all(ZONES.map(async z => {
+        if (cache[z.id]?.nd) { done++; return; } // already loaded from Phase 1
+        try {
+            const om = await fetchOpenMeteo(z.lat, z.lon);
+            const nd = normalizeOpenMeteo(om);
+            wxCacheSet(z.id + cacheSuffix, nd);
+            cache[z.id] = {nd, quality: classify(nd, z), aspectQualities: classifyAllAspects(nd, z)};
+            updateWedges(z.id); refreshMarker(z.id);
+        } catch(err) {
+            console.warn(`[${z.name}]`, err.message);
+            if (!cache[z.id]) cache[z.id] = {nd:null, quality:null, aspectQualities:null, error:err.message};
+        }
+        done++;
+        setStatus(`Loading ${done} / ${ZONES.length}…`);
+    }));
+    renderList();
+    if (activeId) renderDetail(activeId);
+    const t = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+    setStatus(`Updated ${t}`);
+}
+
+// ════════════════════════════════════════════════════════════
+// BOOT — weather and map load independently
+// ════════════════════════════════════════════════════════════
+// _tryInitMap is called by whichever arrives last: DOM ready OR Leaflet async load.
+// If Leaflet is fast it may fire before DOMContentLoaded; if slow, DOMContentLoaded
+// fires first and the weather list/API calls start immediately without waiting for the map.
+window._tryInitMap = function() {
+    if (!window._leafletReady || !window._domReady || window._mapInited) return;
+    window._mapInited = true;
+    try { initMap(); } catch(e) { console.warn('Map init failed:', e.message); }
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Start weather immediately — no waiting for Leaflet
+    renderList();
+    loadAllZones();
+
+    // Signal DOM is ready, then attempt map init
+    window._domReady = true;
+    _tryInitMap();
+});
+
+// Invalidate Leaflet tile layout on orientation change / resize
+window.addEventListener('resize', () => {
+    if (map) map.invalidateSize();
+});
+</script>
+</body>
+</html>
